@@ -1,3 +1,6 @@
 [submodule "external_src/Manifold"]
 	path = external_src/Manifold
 	url = https://github.com/hjwdzh/Manifold.git
+[submodule "external/piper-x-arm"]
+	path = external/piper-x-arm
+	url = git@github.com:The-Robotics-Company/piper-x-arm.git

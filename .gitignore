@@ -6,6 +6,8 @@ dist/
 debug/
 debug*/
 assets/*
+# ...but track our first-class custom robot (PiPER-X) model + meshes
+!assets/piper_x/
 
 # If you're adding things to git under external_src, please do this
 # explicitly by running git add -f <files>, this is to prevent

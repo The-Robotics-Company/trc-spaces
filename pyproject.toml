@@ -101,6 +101,9 @@ curobo = [
 mujoco = [
     "mujoco~=3.5.0",
 ]
+viz = [
+    "rerun-sdk~=0.34.1",  # molmo_spaces.viz rerun logger (web-viewer version must match)
+]
 mujoco-filament = [
     "mujoco @ file://${PROJECT_ROOT}/bin/wheels/mujoco-3.7.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
 ]

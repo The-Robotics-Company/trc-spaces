@@ -1,0 +1,11 @@
+<mujoco model="cube">
+  <!-- 3 cm pick cube (matches reference piper-x-policy cube_cfg: CUBE_SIZE=0.03,
+       mass 0.02). Colour set per-instance in the scene; default = reference red. -->
+  <worldbody>
+    <body name="cube" pos="0 0 0">
+      <freejoint/>
+      <geom name="cube_geom" type="box" size="0.015 0.015 0.015" rgba="0.80 0.15 0.15 1"
+            mass="0.02" friction="1.0 0.02 0.001"/>
+    </body>
+  </worldbody>
+</mujoco>

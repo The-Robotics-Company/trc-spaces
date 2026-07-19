@@ -1,0 +1,19 @@
+{
+    "assetId": "cup",
+    "category": "cup",
+    "description_long": "An open-top tapered cup (top 9 cm, bottom 5.6 cm, 13.8 cm tall) used as the receptacle for placing cubes into. Reuses the reference piper-x-policy cup mesh.",
+    "description": "An open-top cup.",
+    "description_short": {
+        "one_word": "cup",
+        "two_words": "tapered cup",
+        "three_words": "open tapered cup"
+    },
+    "synset": "cup.n.01",
+    "receptacle": true,
+    "mass": 0.12,
+    "boundingBox": {
+        "x": 0.09000000393351226,
+        "y": 0.09000000357627869,
+        "z": 0.27600000028110927
+    }
+}

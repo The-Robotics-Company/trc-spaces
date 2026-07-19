@@ -1,0 +1,12 @@
+{
+    "assetId": "cube",
+    "category": "block",
+    "description_long": "A small blue cube, 4 cm on a side, used as a pick-and-place object.",
+    "description": "A small blue cube.",
+    "description_short": {
+        "one_word": "cube",
+        "two_words": "blue cube",
+        "three_words": "small blue cube"
+    },
+    "synset": "block.n.01"
+}

@@ -1,0 +1,8 @@
+{
+    "articulated_grasp_paths": {},
+    "grasp_paths": {
+        "piper_x": {
+            "cube": "cube/piper_x/grasps.npz"
+        }
+    }
+}

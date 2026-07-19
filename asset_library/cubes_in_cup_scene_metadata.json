@@ -1,0 +1,16 @@
+{
+    "objects": {
+        "cube": {
+            "asset_id": "cube",
+            "object_id": "cube",
+            "category": "block",
+            "is_static": false
+        },
+        "cup": {
+            "asset_id": "cup",
+            "object_id": "cup",
+            "category": "cup",
+            "is_static": false
+        }
+    }
+}

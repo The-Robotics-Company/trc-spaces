@@ -1,0 +1,43 @@
+<mujoco model="piper_x_cubes_in_cup_scene">
+  <!-- Two-board tabletop, EXACT reference dims (piper-x-policy lift/joint_pos_env_cfg).
+       Robot base at world origin, mounted at the near table edge.
+         board1 (table)  40x70 cm, top z=0     center (0.14, 0, -0.0075)
+         board2 (shelf)  35x70 cm, top z=0.13   center (0.445, 0, 0.1225), x 0.27..0.62
+       Cubes and cup both sit ON the upper shelf (board2). Cube+cup are re-sampled
+       per episode by the task sampler; the poses here are nominal spawns. -->
+  <option integrator="implicit" timestep="0.002"/>
+
+  <asset>
+    <model name="cube_model" file="cube/cube.xml"/>
+    <model name="cup_model" file="cup/cup.xml"/>
+    <texture name="floor_tex" type="2d" builtin="checker" rgb1="0.2 0.25 0.3" rgb2="0.15 0.2 0.25"
+             width="512" height="512"/>
+    <material name="floor_mat" texture="floor_tex" texrepeat="6 6" texuniform="true" reflectance="0.1"/>
+    <material name="board_mat" rgba="0.55 0.42 0.30 1"/>
+  </asset>
+
+  <worldbody>
+    <geom name="floor" type="plane" size="2 2 0.1" pos="0 0 -0.74" material="floor_mat"/>
+    <light name="key_light" pos="0.6 -0.6 1.6" dir="-0.3 0.3 -1" directional="true" diffuse="0.8 0.8 0.8"/>
+    <light name="fill_light" pos="-0.4 0.6 1.4" dir="0.3 -0.4 -1" directional="true" diffuse="0.4 0.4 0.4"/>
+
+    <!-- board 1: main table, top surface at z=0 (arm mounted at its near edge) -->
+    <geom name="board1" type="box" pos="0.14 0 -0.0075" size="0.20 0.35 0.0075" material="board_mat"/>
+    <!-- board 2: upper shelf, top surface at z=0.13, cantilevered behind -->
+    <geom name="board2" type="box" pos="0.445 0 0.1225" size="0.175 0.35 0.0075" material="board_mat"/>
+    <!-- simple stand legs under board2 (visual only; static) -->
+    <geom name="shelf_leg_l" type="box" pos="0.58 0.30 0.058" size="0.02 0.02 0.058" material="board_mat"/>
+    <geom name="shelf_leg_r" type="box" pos="0.58 -0.30 0.058" size="0.02 0.02 0.058" material="board_mat"/>
+
+    <!-- cube on the shelf (nominal; re-sampled per episode). Seated ~1mm into the
+         shelf (z=0.144, not 0.145) so a contact registers at scene setup -- the
+         task sampler's get_supporting_geom needs an actual cube<->board2 contact. -->
+    <frame pos="0.32 0.0 0.144">
+      <attach model="cube_model" prefix=""/>
+    </frame>
+    <!-- cup on the shelf (nominal; re-sampled per episode). Base seated ~1mm in. -->
+    <frame pos="0.30 0.17 0.129">
+      <attach model="cup_model" prefix=""/>
+    </frame>
+  </worldbody>
+</mujoco>

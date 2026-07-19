@@ -1,0 +1,14 @@
+{
+    "cube": {
+        "uid": "cube",
+        "object_path": "cube/cube.xml",
+        "metadata_path": "cube/cube_computed.json",
+        "metadata_npz_path": null
+    },
+    "cup": {
+        "uid": "cup",
+        "object_path": "cup/cup.xml",
+        "metadata_path": "cup/cup_computed.json",
+        "metadata_npz_path": null
+    }
+}

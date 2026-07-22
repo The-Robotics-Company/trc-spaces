@@ -56,6 +56,11 @@ class MujocoRerunLogger:
         self._renderer = None
         if self.cameras:
             h, w = camera_res
+            # mujoco's offscreen framebuffer (default 640x480) caps render size
+            if model.vis.global_.offheight < h:
+                model.vis.global_.offheight = h
+            if model.vis.global_.offwidth < w:
+                model.vis.global_.offwidth = w
             self._renderer = mujoco.Renderer(model, height=h, width=w)
         # cache body names once
         self._body_names = [model.body(i).name or f"body_{i}" for i in range(model.nbody)]
@@ -76,6 +81,10 @@ class MujocoRerunLogger:
         constant geom-local transform, so per-step body transforms place them."""
         m = self.model
         for gi in range(m.ngeom):
+            # match MuJoCo's default visibility (groups 0-2): skip collision
+            # geoms (group 3+), which would otherwise draw opaque over visuals
+            if int(m.geom_group[gi]) > 2:
+                continue
             body_id = int(m.geom_bodyid[gi])
             body = self._body_names[body_id]
             gname = m.geom(gi).name or f"geom_{gi}"
@@ -100,8 +109,21 @@ class MujocoRerunLogger:
             fa, fn = int(m.mesh_faceadr[mid]), int(m.mesh_facenum[mid])
             verts = m.mesh_vert[va:va + vn].reshape(-1, 3).astype(np.float32)
             faces = m.mesh_face[fa:fa + fn].reshape(-1, 3).astype(np.uint32)
-            rr.log(path, rr.Mesh3D(vertex_positions=verts, triangle_indices=faces,
-                                   albedo_factor=color), static=True)
+            na, nn = int(m.mesh_normaladr[mid]), int(m.mesh_normalnum[mid])
+            if nn > 0:
+                # mujoco indexes vertices and normals separately per face corner;
+                # expand to per-corner vertices so each corner keeps its authored normal
+                normals = m.mesh_normal[na:na + nn].reshape(-1, 3).astype(np.float32)
+                fnorm = m.mesh_facenormal[fa:fa + fn].reshape(-1, 3).astype(np.uint32)
+                tri_verts = verts[faces.reshape(-1)]
+                tri_normals = normals[fnorm.reshape(-1)]
+                tri_faces = np.arange(len(tri_verts), dtype=np.uint32).reshape(-1, 3)
+                rr.log(path, rr.Mesh3D(vertex_positions=tri_verts, triangle_indices=tri_faces,
+                                       vertex_normals=tri_normals, albedo_factor=color),
+                       static=True)
+            else:
+                rr.log(path, rr.Mesh3D(vertex_positions=verts, triangle_indices=faces,
+                                       albedo_factor=color), static=True)
         elif gtype == G.mjGEOM_BOX:
             rr.log(path, rr.Boxes3D(half_sizes=[size[:3]], colors=[color]), static=True)
         elif gtype == G.mjGEOM_SPHERE:
@@ -112,9 +134,10 @@ class MujocoRerunLogger:
             rr.log(path, rr.Capsules3D(radii=[r], lengths=[2 * hl],
                                        translations=[[0, 0, -hl]], colors=[color]), static=True)
         elif gtype == G.mjGEOM_PLANE:
-            # render a large thin slab for the ground
-            sx = size[0] if size[0] > 0 else 5.0
-            sy = size[1] if size[1] > 0 else 5.0
+            # render a thin slab for the ground; cap the extent so an infinite
+            # (size 0) or huge plane doesn't blow up the viewer's auto-framing
+            sx = min(size[0], 2.0) if size[0] > 0 else 2.0
+            sy = min(size[1], 2.0) if size[1] > 0 else 2.0
             rr.log(path, rr.Boxes3D(half_sizes=[[sx, sy, 0.001]], colors=[color]), static=True)
         # else: unsupported geom type -> skip silently
 

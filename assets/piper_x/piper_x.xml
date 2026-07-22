@@ -105,11 +105,13 @@
                     <!-- Orbbec DC1 wrist cam on the printed mount. Orientation from the
                          piper-x-arm CAD source of truth (cad/models/arm/wrist_cam_mount.scad
                          via preview_mount.cam_local_transform), converted to MuJoCo camera
-                         convention; position hand-tuned against the real camera feed
-                         (scripts/viz/cam_match.py). fovy from the DC1 color intrinsics
-                         (fy=486.64, h=480). -->
+                         convention, then rolled 180 deg about the optical axis because the
+                         DC1 is mounted upside down — rendered images match the real feed
+                         directly (no post-hoc flip). Position hand-tuned against the real
+                         camera feed (scripts/viz/cam_match.py). fovy from the DC1 color
+                         intrinsics (fy=486.64, h=480). -->
                     <camera name="wrist_camera" pos="-0.07734 -0.00800 0.04364"
-                            quat="-0.190415 0.680986 0.680986 -0.190415" fovy="52.5"/>
+                            quat="0.190415 0.680986 -0.680986 -0.190415" fovy="52.5"/>
                     <body name="gripper_link1" gravcomp="1" pos="0 0 0.1358" quat="0.707107 0.707107 0 0">
                       <inertial pos="0.000651232 -0.049193 0.00972259" quat="0.477798 0.572974 -0.518028 0.418398" mass="0.025" diaginertia="7.74531e-05 7.36783e-05 5.0886e-06"/>
                       <joint name="gripper_joint1" class="finger" pos="0 0 0" axis="0 0 1" type="slide" range="0 0.05"/>

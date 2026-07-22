@@ -149,8 +149,9 @@ def main():
 
         renderer.update_scene(data, camera=f"{ns}wrist_camera")
         sim = cv2.cvtColor(renderer.render(), cv2.COLOR_RGB2BGR)
-        sim = cv2.rotate(sim, cv2.ROTATE_180)  # DC1 is mounted upside down
-        panels.append(label(sim, f"sim wrist cam 180 (pose {wp})"))
+        # no flip: the 180 deg roll (upside-down DC1 mount) is baked into the
+        # wrist_camera quat in piper_x.xml, so the render matches the real feed
+        panels.append(label(sim, f"sim wrist cam (pose {wp})"))
 
         canvas = np.hstack(panels)
         bar = np.zeros((56, canvas.shape[1], 3), np.uint8)

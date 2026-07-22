@@ -223,29 +223,46 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
     def _arm_seed(self) -> list:
         return self.robot_view.get_move_group("arm").joint_pos.tolist()
 
-    def _ik_world(self, pose_world: np.ndarray, seed: list | None) -> list | None:
-        """Solve IK for a single 4x4 world-frame EE pose; returns arm joints or None."""
+    def _ik_world(self, pose_world: np.ndarray, seed: list | None,
+                  check_collision: bool = False) -> list | None:
+        """Solve IK for a single 4x4 world-frame EE pose; returns arm joints or None.
+
+        check_collision=True makes cuRobo reject configs whose collision spheres
+        hit registered world obstacles (see _sync_cup_obstacle) or self-collide.
+        """
         base = self.task.env.current_robot.robot_view.base.pose
         pose_base = np.linalg.inv(base) @ pose_world
         goal7 = pose_mat_to_7d(pose_base)  # [x, y, z, qw, qx, qy, qz]
         joint_config, _ = self._get_planner().ik_solve(
-            goal7.tolist(), seed_config=seed, disable_collision=True
+            goal7.tolist(), seed_config=seed, disable_collision=not check_collision
         )
         return joint_config
 
-    def _ik_world_robust(self, pose_world: np.ndarray) -> list | None:
+    def _ik_world_robust(self, pose_world: np.ndarray,
+                         check_collision: bool = False) -> list | None:
         """IK seeded from the current arm config, falling back to cuRobo's
         64-random-seed solve (seed_config=None). ik_solve uses ONLY the given seed
         when one is passed, so a single seed spuriously fails reachable poses; the
         seed=None solve is what actually determines feasibility."""
-        return (self._ik_world(pose_world, self._arm_seed())
-                or self._ik_world(pose_world, None))
+        return (self._ik_world(pose_world, self._arm_seed(), check_collision)
+                or self._ik_world(pose_world, None, check_collision))
 
-    def check_feasible_ik(self, pose):
+    def check_feasible_ik(self, pose, check_collision: bool = False):
         single = pose.ndim == 2
         poses = [pose] if single else list(pose)
-        mask = np.array([self._ik_world_robust(p) is not None for p in poses], dtype=bool)
+        mask = np.array([self._ik_world_robust(p, check_collision) is not None
+                         for p in poses], dtype=bool)
         return bool(mask[0]) if single else mask
+
+    def _sync_cup_obstacle(self, place_receptacle) -> str:
+        """Register/refresh the cup as a cuRobo world obstacle (AABB cuboid).
+
+        Poses go to cuRobo in the robot base frame; the PiPER-X base sits at the
+        world origin in this task (base_size=None), so world poses pass through
+        unchanged. Revisit if the robot base ever moves.
+        """
+        self._get_planner().update_world([place_receptacle])
+        return place_receptacle.name
 
     # The cube sits ~0.03 m along the tool +z (approach) beyond the TCP/grasp_site
     # (measured in the assembled scene); used to place the CUBE over the cup.
@@ -258,15 +275,20 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
         reach), lift is just a modest straight-up raise to clear the shelf while
         keeping the grasp orientation; the level place poses handle the cup height.
         """
+        # cup as collision obstacle for the PICK side only: approach/grasp/lift
+        # configs must clear the cup. The place side disables it (the level-place
+        # wrist must reach over the rim, and the fingertips dip below it).
+        cup_name = self._sync_cup_obstacle(place_receptacle)
+        self._get_planner().enable_obstacles([cup_name], True)
         pregrasp = grasp_pose_world.copy()
         pregrasp[:3, 3] -= self.policy_config.pregrasp_z_offset * pregrasp[:3, 2]
-        if not self.check_feasible_ik(pregrasp):
+        if not self.check_feasible_ik(pregrasp, check_collision=True):
             raise ValueError("IK failed for pregrasp pose")
-        if not self.check_feasible_ik(grasp_pose_world):
+        if not self.check_feasible_ik(grasp_pose_world, check_collision=True):
             raise ValueError("IK failed for grasp pose")
         lift = grasp_pose_world.copy()
         lift[2, 3] += 0.08  # raise the cube ~8 cm straight up, clear of the shelf
-        if not self.check_feasible_ik(lift):
+        if not self.check_feasible_ik(lift, check_collision=True):
             raise ValueError("IK failed for lift pose")
         return pregrasp, grasp_pose_world, lift
 
@@ -281,6 +303,10 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
         opening the gripper drops the cube straight down into the cup.
         """
         from molmo_spaces.utils.mj_model_and_data_utils import body_aabb
+
+        # the cup obstacle (enabled for the pick side) must not veto reaching
+        # over its own rim; collision stays off for place-side IK regardless
+        self._get_planner().enable_obstacles([place_receptacle.name], False)
 
         data = self.task.env.current_data
         center, size = body_aabb(data.model, data, place_receptacle.object_id)

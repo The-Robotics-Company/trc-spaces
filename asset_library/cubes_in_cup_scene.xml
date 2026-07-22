@@ -7,6 +7,11 @@
        per episode by the task sampler; the poses here are nominal spawns. -->
   <option integrator="implicit" timestep="0.002"/>
 
+  <!-- Anchor the scene scale explicitly (Menagerie convention): the auto-computed
+       extent (~11 m, dominated by the floor plane) makes znear = 0.01*extent ≈ 11 cm,
+       which near-clips the gripper out of the wrist camera. extent 1.2 -> znear 12 mm. -->
+  <statistic center="0.3 0 0.15" extent="1.2"/>
+
   <asset>
     <model name="cube_model" file="cube/cube.xml"/>
     <model name="cup_model" file="cup/cup.xml"/>

@@ -160,6 +160,14 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
             if np.linalg.norm(cube_xy - cup_xy) >= self.MIN_CUBE_CUP:
                 break
             cube_xy = self._sample_shelf_xy()
+        else:
+            # MIN_CUBE_CUP is a large fraction of the region diagonal, so the
+            # rejection loop can exhaust; park the cup in the corner farthest
+            # from the cube instead of silently accepting a violating layout
+            corners = np.array([[x, y] for x in self.REGION_X for y in self.REGION_Y])
+            cup_xy = corners[np.argmax(np.linalg.norm(corners - cube_xy, axis=1))]
+            cup.pose = self._pose(cup_xy[0], cup_xy[1], self.CUP_Z,
+                                  yaw=np.random.uniform(-np.pi, np.pi))
         cube = create_mlspaces_body(env.current_data, task_cfg.pickup_obj_name)
         cube.pose = self._pose(cube_xy[0], cube_xy[1], self.CUBE_Z,
                                yaw=np.random.uniform(-np.pi, np.pi))
@@ -257,11 +265,25 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
     def _sync_cup_obstacle(self, place_receptacle) -> str:
         """Register/refresh the cup as a cuRobo world obstacle (AABB cuboid).
 
+        Built from the live AABB rather than planner.update_world(), which uses
+        object.pose directly as the cuboid pose — for the cup that is the BASE
+        frame origin, sinking the obstacle box half a cup-height too low and
+        leaving the rim unprotected. Cuboid poses must be the volume center.
+
         Poses go to cuRobo in the robot base frame; the PiPER-X base sits at the
         world origin in this task (base_size=None), so world poses pass through
         unchanged. Revisit if the robot base ever moves.
         """
-        self._get_planner().update_world([place_receptacle])
+        from curobo.geom.types import Cuboid, WorldConfig
+
+        from molmo_spaces.utils.mj_model_and_data_utils import body_aabb
+
+        data = self.task.env.current_data
+        center, size = body_aabb(data.model, data, place_receptacle.object_id)
+        cuboid = Cuboid(name=place_receptacle.name,
+                        pose=[*np.asarray(center).tolist(), 1.0, 0.0, 0.0, 0.0],
+                        dims=np.asarray(size).tolist())
+        self._get_planner().motion_gen.update_world(WorldConfig(cuboid=[cuboid]))
         return place_receptacle.name
 
     # The cube sits ~0.03 m along the tool +z (approach) beyond the TCP/grasp_site
@@ -279,16 +301,21 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
         # configs must clear the cup. The place side disables it (the level-place
         # wrist must reach over the rim, and the fingertips dip below it).
         cup_name = self._sync_cup_obstacle(place_receptacle)
+        self._cup_obstacle_name = cup_name  # reused by _compute_trajectory
         self._get_planner().enable_obstacles([cup_name], True)
         pregrasp = grasp_pose_world.copy()
         pregrasp[:3, 3] -= self.policy_config.pregrasp_z_offset * pregrasp[:3, 2]
         if not self.check_feasible_ik(pregrasp, check_collision=True):
             raise ValueError("IK failed for pregrasp pose")
-        if not self.check_feasible_ik(grasp_pose_world, check_collision=True):
+        # grasp/lift are near-contact configs (fingers around the cube, wrist
+        # just over the shelf): collision-sphere margins spuriously reject them,
+        # so they get plain reachability checks; path safety comes from the
+        # motion-planned transfer segments
+        if not self.check_feasible_ik(grasp_pose_world):
             raise ValueError("IK failed for grasp pose")
         lift = grasp_pose_world.copy()
         lift[2, 3] += 0.08  # raise the cube ~8 cm straight up, clear of the shelf
-        if not self.check_feasible_ik(lift, check_collision=True):
+        if not self.check_feasible_ik(lift):
             raise ValueError("IK failed for lift pose")
         return pregrasp, grasp_pose_world, lift
 
@@ -352,41 +379,93 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
         return action
 
     def _compute_trajectory(self):
-        """Solve cuRobo IK per waypoint (seed-chained) and drive in joint space."""
+        """Long transfer moves are planned by cuRobo motion_gen as whole
+        collision-free trajectories (cup registered as obstacle); the short
+        structured moves (approach descent, vertical lift, place descent,
+        retreat) stay straight-line by design."""
         robot_view = self.task.env.current_robot.robot_view
         target_poses = self._compute_target_poses()  # validated world-frame EE poses
 
-        order = ["pregrasp", "grasp", "lift", "preplace", "place", "postplace"]
-        seed = robot_view.get_move_group("arm").joint_pos.tolist()
-        home_seed = list(seed)
-        qs: dict[str, dict] = {}
-        for name in order:
-            # Seed-chain for joint-space continuity, but fall back to broader
-            # seeding when a single seed lands in a bad IK basin (ik_solve uses
-            # only the given seed; seed=None triggers cuRobo's 64-random-seed
-            # solve = robust, matching the base feasibility check).
-            jc = self._ik_world(target_poses[name], seed)
-            if jc is None:  # retry from the folded-home seed
-                jc = self._ik_world(target_poses[name], home_seed)
-            if jc is None:  # last resort: cuRobo multi-seed solve (no continuity)
-                jc = self._ik_world(target_poses[name], None)
-            if jc is None:
-                raise ValueError(f"cuRobo IK failed for {name} pose")
-            qs[name] = {"arm": np.asarray(jc)}
-            seed = list(jc)  # chain for joint-space continuity
-
         pc = self.policy_config
+        home_seed = robot_view.get_move_group("arm").joint_pos.tolist()
+        base_inv = np.linalg.inv(robot_view.base.pose)
+        cup_name = getattr(self, "_cup_obstacle_name", None)
 
         def jseg(name, end_qpos, dur, start_qpos=None):
             return JointMoveSegment(name=name, start_qpos=start_qpos,
                                     end_qpos=end_qpos, duration_s=dur)
+
+        def plan_jsegs(name, start_q, pose_world, total_dur,
+                       avoid_cup=True, max_waypoints=12):
+            """Whole collision-free trajectory to a world pose via motion_gen.
+
+            Returns (list of JointMoveSegments tracing the plan, final joints).
+            The interpolated plan is downsampled to <= max_waypoints knots;
+            JointMoveSequence interpolates linearly between adjacent knots,
+            which stays within a knot spacing of the planned path.
+            """
+            if cup_name is not None:
+                self._get_planner().enable_obstacles([cup_name], avoid_cup)
+            goal7 = pose_mat_to_7d(base_inv @ pose_world)
+            traj, result = self._get_planner().motion_plan(
+                list(start_q), [goal7.tolist()])
+            if not bool(result.success.item()):
+                raise ValueError(f"cuRobo motion plan failed for {name}")
+            traj = np.asarray(traj)
+            if len(traj) > max_waypoints:
+                keep = np.linspace(0, len(traj) - 1, max_waypoints).round().astype(int)
+                traj = traj[keep]
+            dt = total_dur / max(len(traj) - 1, 1)
+            segs = []
+            for i in range(1, len(traj)):
+                segs.append(jseg(
+                    f"{name}_{i}", {"arm": np.asarray(traj[i])}, dt,
+                    start_qpos=None if i == 1 else {"arm": np.asarray(traj[i - 1])},
+                ))
+            return segs, list(traj[-1])
+
+        # home -> pregrasp: planned around the cup
+        pregrasp_segs, q_pregrasp = plan_jsegs(
+            "pregrasp", home_seed, target_poses["pregrasp"], 2.5, avoid_cup=True)
+        qs: dict[str, dict] = {"pregrasp": {"arm": np.asarray(q_pregrasp)}}
+
+        # remaining straight-line waypoints: seed-chained IK for continuity,
+        # falling back to home seed then cuRobo's 64-seed solve
+        seed = list(q_pregrasp)
+        for name in ["grasp", "lift", "preplace", "place", "postplace"]:
+            jc = (self._ik_world(target_poses[name], seed)
+                  or self._ik_world(target_poses[name], home_seed)
+                  or self._ik_world(target_poses[name], None))
+            if jc is None:
+                raise ValueError(f"cuRobo IK failed for {name} pose")
+            qs[name] = {"arm": np.asarray(jc)}
+            seed = list(jc)
+
+        # lift -> preplace carry: planned; prefer avoiding the cup, but fall
+        # back to a direct plan if the rim clearance makes it infeasible
+        # (preplace hovers only 6 cm over the rim)
+        try:
+            carry_segs, q_preplace = plan_jsegs(
+                "preplace", qs["lift"]["arm"].tolist(),
+                target_poses["preplace"], 2.0, avoid_cup=True)
+        except ValueError:
+            carry_segs, q_preplace = plan_jsegs(
+                "preplace", qs["lift"]["arm"].tolist(),
+                target_poses["preplace"], 2.0, avoid_cup=False)
+        qs["preplace"] = {"arm": np.asarray(q_preplace)}
+        # re-chain the place descent from the planned carry endpoint
+        jc = (self._ik_world(target_poses["place"], q_preplace)
+              or self._ik_world(target_poses["place"], None))
+        if jc is None:
+            raise ValueError("cuRobo IK failed for place pose")
+        qs["place"] = {"arm": np.asarray(jc)}
 
         return [
             GripperAction(robot_view, True, 0.0),
             JointMoveSequence(
                 robot_view, pc.move_settle_time,
                 move_segments=[
-                    jseg("pregrasp", qs["pregrasp"], 2.5),
+                    *pregrasp_segs,
                     jseg("grasp", qs["grasp"], 1.5, start_qpos=qs["pregrasp"]),
                 ],
             ),
@@ -397,7 +476,7 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
                 gripper_empty_threshold=pc.gripper_empty_threshold,
                 move_segments=[
                     jseg("lift", qs["lift"], 1.5, start_qpos=qs["grasp"]),
-                    jseg("preplace", qs["preplace"], 2.0, start_qpos=qs["lift"]),
+                    *carry_segs,
                     jseg("place", qs["place"], 1.5, start_qpos=qs["preplace"]),
                 ],
             ),

@@ -82,9 +82,16 @@ def serve_single_port(rrd_path: str, port: int, bind: str, title: str = "molmo_s
     )
 
 
-def build_piper_scene():
+def build_piper_scene(light_bg: bool = False):
     cfg = PiperXRobotConfig()
     spec = mujoco.MjSpec()
+    if light_bg:
+        # light gradient skybox so empty space renders bright, not black
+        spec.add_texture(
+            name="skybox", type=mujoco.mjtTexture.mjTEXTURE_SKYBOX,
+            builtin=mujoco.mjtBuiltin.mjBUILTIN_GRADIENT,
+            rgb1=[0.9, 0.9, 0.92], rgb2=[0.7, 0.72, 0.75], width=256, height=256,
+        )
     spec.worldbody.add_light(pos=[0.5, 0.5, 3], dir=[-0.2, -0.2, -1])
     spec.worldbody.add_light(pos=[0.3, -0.3, 0.9], dir=[-0.3, 0.3, -0.3])  # fill for the gripper
     # camera headlight + ambient so close-up views (esp. the wrist cam looking up at

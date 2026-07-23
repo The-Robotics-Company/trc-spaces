@@ -96,12 +96,15 @@ robot_cfg:
         # Lock the coupled parallel gripper OPEN during planning (j1=+0.05, j2=-0.05),
         # so the fingers' swept volume is conservatively accounted for. The gripper
         # is commanded separately by the policy, not planned by cuRobo.
-        lock_joints: {"gripper_joint1": 0.05, "gripper_joint2": -0.05}
+        # approach opening (5 cm span), matches set_gripper_ctrl_open in
+        # piper_x_view.py — full open (0.05) makes the collision model reject
+        # any grasp near the cup
+        lock_joints: {"gripper_joint1": 0.025, "gripper_joint2": -0.025}
 
         cspace:
             joint_names: ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
-            # elbow-off-singularity home (matches PiperXRobotConfig init_qpos arm).
-            retract_config: [0.0, 1.2, -1.2, 0.0, 0.6, 0.0]
+            # home config (matches PiperXRobotConfig init_qpos arm).
+            retract_config: [0.0, 1.2, -1.2, 0.0, 0.0, 0.0]
             null_space_weight: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
             cspace_distance_weight: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
             max_jerk: 500.0

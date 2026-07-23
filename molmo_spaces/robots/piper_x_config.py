@@ -28,11 +28,12 @@ class PiperXRobotConfig(BaseRobotConfig):
     # Base platform [width, depth, height] - raises the arm to counter height so
     # the ~0.6m-reach arm can access typical tabletop/counter objects.
     base_size: list[float] | None = [0.2, 0.2, 0.7]
-    # Home config: arm folded up, offset joints 4/5 away from the wrist singularity.
+    # Home config: arm folded up, wrist straight. Must stay in sync with the
+    # "home" keyframe in piper_x.xml and retract_config in curobo_config/piper_x.yml.
     # gripper = [gripper_joint1, gripper_joint2] (coupled, opposite signs)
     init_qpos: dict[str, list[float]] = {
         "base": [],
-        "arm": [0.0, 1.2, -1.2, 0.0, 0.6, 0.0],
+        "arm": [0.0, 1.2, -1.2, 0.0, 0.0, 0.0],
         "gripper": [0.0, 0.0],
     }
     init_qpos_noise_range: dict[str, list[float]] | None = None

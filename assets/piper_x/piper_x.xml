@@ -186,7 +186,7 @@
   </actuator>
 
   <keyframe>
-    <!-- home: arm folded up out of singularity, gripper open -->
-    <key name="home" qpos="0 1.2 -1.2 0 0.6 0 0.05 -0.05" ctrl="0 1.2 -1.2 0 0.6 0 0.05"/>
+    <!-- home: arm folded up, wrist straight, gripper open -->
+    <key name="home" qpos="0 1.2 -1.2 0 0 0 0.05 -0.05" ctrl="0 1.2 -1.2 0 0 0 0.05"/>
   </keyframe>
 </mujoco>

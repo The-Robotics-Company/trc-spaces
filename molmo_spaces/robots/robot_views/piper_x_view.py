@@ -91,8 +91,20 @@ class PiperXGripperGroup(MJCFFrameMixin, GripperGroup):
         return "site"
 
     def set_gripper_ctrl_open(self, open: bool) -> None:
-        """gripper actuator ctrlrange is 0.0 (closed) .. 0.05 (open)."""
-        self.ctrl = [0.05 if open else 0.0]
+        """gripper actuator ctrlrange is 0.0 .. 0.05 (full open).
+
+        "Open" targets 0.025 per finger (5 cm span), not full open: wide enough
+        to straddle the 3 cm cube with margin, narrow enough that the swept
+        finger volume clears nearby obstacles (full open is a 9.8 cm blade that
+        hits the cup when grasping near it). Must match lock_joints in
+        curobo_config/piper_x.yml so the planner models the same finger span.
+
+        "Closed" targets 0.01 per finger (2 cm inter-finger distance), not 0:
+        closing to 0 makes the position servo squeeze a blocking object with
+        force proportional to its width (~3 N on the 2.9 cm cube, 40 N cap).
+        Targeting just under the cube width grips at ~0.9 N.
+        """
+        self.ctrl = [0.025 if open else 0.01]
 
     @property
     def inter_finger_dist_range(self) -> tuple[float, float]:

@@ -44,6 +44,7 @@ from molmo_spaces.policy.solvers.object_manipulation.base_object_manipulation_pl
     GripperAction,
     JointMoveSegment,
     JointMoveSequence,
+    JointTrajectorySegment,
     NoopAction,
 )
 from molmo_spaces.policy.solvers.object_manipulation.pick_and_place_planner_policy import (
@@ -297,6 +298,10 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
                     # of this shelf workspace -> huge detour arcs; 3 cm keeps the
                     # penalty local to actual near-collisions
                     collision_activation_distance=0.03,
+                    # retime transfers to 40% of the joint velocity/accel limits
+                    # (0.5 still read as too fast); result.motion_time reflects
+                    # this, so replay slows with it
+                    time_dilation_factor=0.4,
                 )
             )
         return cls._planner
@@ -304,6 +309,12 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
     def reset(self, reset_retries: bool = True):
         if self.task.episode_step_count == 0:
             self._skip_cubes: set[str] = set()  # fresh episode, no blacklist
+            self._homing = False  # final go_home not started
+            om = self.task.env.object_managers[self.task.env.current_batch_index]
+            self._episode_cubes = [
+                n for n in PiperXCubesInCupTaskSampler.CUBE_NAMES
+                if 0.135 < om.get_object_by_name(n).position[2] < 0.20
+            ]  # cubes that start on the shelf (surplus ones are parked below)
         super().reset(reset_retries)
 
     def _next_shelf_cube(self) -> str | None:
@@ -334,6 +345,19 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
                 best, best_d = name, d
         return best
 
+    def _all_cubes_in_cup(self) -> bool:
+        """True when every cube that started on the shelf ended up in the cup
+        (same in-cup classification as _next_shelf_cube: on the cup axis at
+        shelf height or above)."""
+        om = self.task.env.object_managers[self.task.env.current_batch_index]
+        cup = om.get_object_by_name(self.config.task_config.place_receptacle_name)
+        cup_xy = np.asarray(cup.position[:2])
+        for name in self._episode_cubes:
+            p = np.asarray(om.get_object_by_name(name).position)
+            if np.linalg.norm(p[:2] - cup_xy) > 0.07 or p[2] < 0.13:
+                return False
+        return True
+
     def _advance_to_next_cube(self) -> bool:
         """Retarget to the next shelf cube and replan; False when none are left."""
         while True:
@@ -351,13 +375,21 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
 
     def get_action(self, info):
         action = super().get_action(info)
-        if action.get("done"):
-            # current cube's script finished (or its retries ran out) — chain to
-            # the next shelf cube instead of ending the episode
+        if action.get("done") and not self._homing:
+            # current cube's script finished (or its retries ran out) — chain
+            # straight from the retreat pose to the next shelf cube; park the
+            # arm at home only when none remain
             if action.get("success") is False:
                 self._skip_cubes.add(self.config.task_config.pickup_obj_name)
             if self._advance_to_next_cube():
                 action = super().get_action(info)
+            elif self._all_cubes_in_cup():
+                # full success: park the arm back at home
+                self._homing = True
+                self.action_primitives = self._go_home_primitives()
+                self.action_idx = 0
+                action = super().get_action(info)
+            # else: some cube was skipped/lost — end at the retreat pose
         # Latch the gripper command. JointMoveSequence.get_current_action drops
         # gripper move groups, so without this the gripper controller reverts to
         # its reset (closed) target during joint moves and never opens for the
@@ -645,39 +677,29 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
                 return self._handle_failure()
         return action
 
-    def _plan_transfer_segs(self, name, start_q, pose_world):
+    def _plan_transfer_seg(self, name, start_q, pose_world):
         """Whole collision-free trajectory to a world pose via motion_gen,
         executed on cuRobo's own timing. The cup obstacle set is always active.
 
-        Returns (list of JointMoveSegments tracing the plan, final joints).
-        The interpolated plan is replayed over ``result.motion_time`` — the
-        duration cuRobo computed to respect the joint velocity/acceleration
-        limits — NOT an imposed duration. Knots are kept at ~10 Hz (finer than
-        the control loop), so the linear interpolation between adjacent knots
-        is negligible.
+        Returns (JointTrajectorySegment tracking the plan, final joints).
+        The segment carries cuRobo's native interpolated plan (dense,
+        jerk-limited, ``time_dilation_factor`` applied) spread over
+        ``result.motion_time``; the executor samples it at the executed time,
+        so the commanded motion is exactly the planner's smooth profile.
         """
         base_inv = np.linalg.inv(self.robot_view.base.pose)
         goal7 = pose_mat_to_7d(base_inv @ pose_world)
         traj, result = self._get_planner().motion_plan(list(start_q), [goal7.tolist()])
         if not bool(result.success.item()):
             raise ValueError(f"cuRobo motion plan failed for {name}")
-        traj = np.asarray(traj)
+        traj = np.asarray(traj, dtype=float)
         motion_time = max(float(result.motion_time), 0.5)
-        n_knots = int(motion_time / 0.1) + 2
-        if len(traj) > n_knots:
-            keep = np.linspace(0, len(traj) - 1, n_knots).round().astype(int)
-            traj = traj[keep]
-        dt = motion_time / max(len(traj) - 1, 1)
-        segs = [
-            JointMoveSegment(
-                name=f"{name}_{i}",
-                start_qpos=None if i == 1 else {"arm": np.asarray(traj[i - 1])},
-                end_qpos={"arm": np.asarray(traj[i])},
-                duration_s=dt,
-            )
-            for i in range(1, len(traj))
-        ]
-        return segs, list(traj[-1])
+        seg = JointTrajectorySegment(
+            name=name,
+            times=np.linspace(0.0, motion_time, len(traj)),
+            waypoints={"arm": traj},
+        )
+        return seg, list(traj[-1])
 
     def _correct_place_descent(self, seq: "_PlaceCorrectingSequence") -> None:
         """Re-aim the place descent from the measured in-hand cube pose.
@@ -735,15 +757,16 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
         target_poses = self._compute_target_poses()  # validated world-frame EE poses
 
         pc = self.policy_config
-        home_seed = robot_view.get_move_group("arm").joint_pos.tolist()
+        start_q = robot_view.get_move_group("arm").joint_pos.tolist()
 
         def jseg(name, end_qpos, dur, start_qpos=None):
             return JointMoveSegment(name=name, start_qpos=start_qpos,
                                     end_qpos=end_qpos, duration_s=dur)
 
-        # home -> pregrasp: planned around the cup
-        pregrasp_segs, q_pregrasp = self._plan_transfer_segs(
-            "pregrasp", home_seed, target_poses["pregrasp"])
+        # live start (home for the 1st cube, post-place retreat after) ->
+        # pregrasp: planned around the cup
+        pregrasp_seg, q_pregrasp = self._plan_transfer_seg(
+            "pregrasp", start_q, target_poses["pregrasp"])
         qs: dict[str, dict] = {"pregrasp": {"arm": np.asarray(q_pregrasp)}}
 
         # remaining straight-line waypoints: seed-chained collision-checked IK,
@@ -751,7 +774,7 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
         seed = list(q_pregrasp)
         for name in ["grasp", "lift", "preplace", "place", "postplace"]:
             jc = (self._ik_world(target_poses[name], seed, check_collision=True)
-                  or self._ik_world(target_poses[name], home_seed, check_collision=True)
+                  or self._ik_world(target_poses[name], start_q, check_collision=True)
                   or self._ik_world(target_poses[name], None, check_collision=True))
             if jc is None:
                 raise ValueError(f"cuRobo IK failed for {name} pose")
@@ -760,7 +783,7 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
 
         # lift -> preplace carry: planned around the cup (the hollow cup model
         # keeps the 6-cm-over-rim preplace goal feasible — no disable fallback)
-        carry_segs, q_preplace = self._plan_transfer_segs(
+        carry_seg, q_preplace = self._plan_transfer_seg(
             "preplace", qs["lift"]["arm"].tolist(), target_poses["preplace"])
         qs["preplace"] = {"arm": np.asarray(q_preplace)}
         # re-chain the place descent from the planned carry endpoint
@@ -777,7 +800,7 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
             JointMoveSequence(
                 robot_view, pc.move_settle_time,
                 move_segments=[
-                    *pregrasp_segs,
+                    pregrasp_seg,
                     jseg("grasp", qs["grasp"], 1.5, start_qpos=qs["pregrasp"]),
                 ],
             ),
@@ -788,7 +811,7 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
                 gripper_empty_threshold=pc.gripper_empty_threshold,
                 move_segments=[
                     jseg("lift", qs["lift"], 1.5, start_qpos=qs["grasp"]),
-                    *carry_segs,
+                    carry_seg,
                     jseg("place", qs["place"], 1.5, start_qpos=qs["preplace"]),
                 ],
                 correct_fn=self._correct_place_descent,
@@ -798,9 +821,23 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
                 robot_view, pc.move_settle_time,
                 move_segments=[self._retreat_seg],
             ),
+        ]
+
+    def _go_home_primitives(self):
+        """Final parking move — run once after the last cube, not per cube.
+
+        Per-cube scripts end at the post-place retreat; the next cube's
+        pregrasp transfer plans from the live (retreat) joints, so chaining
+        needs no detour through home.
+        """
+        robot_view = self.robot_view
+        pc = self.policy_config
+        return [
             JointMoveSequence(
                 robot_view, pc.move_settle_time,
-                move_segments=[jseg("go_home", self.config.robot_config.init_qpos, 3.0)],
+                move_segments=[JointMoveSegment(
+                    name="go_home", start_qpos=None,
+                    end_qpos=self.config.robot_config.init_qpos, duration_s=3.0)],
             ),
             NoopAction(robot_view, 2.0),
         ]
@@ -815,8 +852,8 @@ class PiperXCubesInCupDataGenConfig(PickAndPlaceDataGenConfig):
     seed: int | None = 0
     filter_for_successful_trajectories: bool = False
     use_passive_viewer: bool = False
-    # one pick-place cycle is ~220-260 steps; budget 4 cubes + retry slack
-    # (600 truncated 4-cube episodes after the 3rd cube)
+    # one pick-place cycle is ~145-175 steps (cubes chain retreat->pregrasp,
+    # home only after full success); budget 4 cubes + retry slack
     task_horizon: int | None = 1400
 
     # Fixed-base tabletop: no 0.7 m pedestal (arm base at z=0, matching board1 top).

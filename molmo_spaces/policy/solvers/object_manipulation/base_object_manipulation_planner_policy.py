@@ -24,6 +24,17 @@ from molmo_spaces.utils.profiler_utils import Timer
 log = logging.getLogger(__name__)
 
 
+def minjerk(t: float) -> float:
+    """Quintic ease on [0, 1]: zero velocity and acceleration at both ends.
+
+    Applied to every point-to-point segment so the commanded trajectory has no
+    velocity discontinuity at segment boundaries (each segment starts and ends
+    at rest, which is what the surrounding contact-critical moves assume).
+    """
+    t = min(max(t, 0.0), 1.0)
+    return t * t * t * (10.0 + t * (6.0 * t - 15.0))
+
+
 @dataclass
 class MoveSegment:
     """
@@ -71,6 +82,34 @@ class JointMoveSegment(MoveSegment):
     @property
     def duration(self) -> float:
         return self.duration_s
+
+
+@dataclass
+class JointTrajectorySegment(MoveSegment):
+    """
+    A move segment that tracks a densely time-sampled joint trajectory
+    (e.g. a motion planner's interpolated plan) on its native timing.
+    The executor samples the trajectory at the executed time, so the
+    planner's velocity/acceleration profile is preserved exactly.
+    """
+
+    times: np.ndarray  # (N,) seconds from segment start, monotonically increasing
+    waypoints: dict[str, np.ndarray]  # movegroup -> (N, dof) joint positions
+
+    @property
+    def duration(self) -> float:
+        return float(self.times[-1])
+
+    @property
+    def end_qpos(self) -> dict[str, np.ndarray]:
+        return {k: w[-1] for k, w in self.waypoints.items()}
+
+    def qpos_at(self, elapsed: float) -> dict[str, np.ndarray]:
+        t = float(np.clip(elapsed, 0.0, self.duration))
+        return {
+            k: np.array([np.interp(t, self.times, w[:, d]) for d in range(w.shape[1])])
+            for k, w in self.waypoints.items()
+        }
 
 
 class ActionPrimitive(ABC):
@@ -148,7 +187,7 @@ class MoveSequence(ActionPrimitive):
         elapsed_time = self.robot_view.mj_data.time - self.move_seg_start_time
         if self.move_seg_idx < len(self.move_segments):
             move_seg = self.move_segments[self.move_seg_idx]
-            t = min(1.0, elapsed_time / move_seg.duration)
+            t = minjerk(elapsed_time / move_seg.duration)
 
             lin_vel, ang_vel = transform_to_twist(
                 np.linalg.inv(move_seg.start_pose) @ move_seg.end_pose
@@ -234,7 +273,7 @@ class TCPMoveSequence(MoveSequence):
         assert self.move_seg_idx is not None
         if self.move_seg_idx < len(self.move_segments):
             move_seg = self.move_segments[self.move_seg_idx]
-            t = min(1.0, elapsed_time / move_seg.duration)
+            t = minjerk(elapsed_time / move_seg.duration)
 
             lin_vel, ang_vel = transform_to_twist(
                 np.linalg.inv(move_seg.start_pose) @ move_seg.end_pose
@@ -303,7 +342,7 @@ class JointMoveSequence(MoveSequence):
         assert self.move_seg_idx is not None
         if self.move_seg_idx < len(self.move_segments):
             move_seg = self.move_segments[self.move_seg_idx]
-            if move_seg.start_qpos is None:
+            if isinstance(move_seg, JointMoveSegment) and move_seg.start_qpos is None:
                 move_seg.start_qpos = self.robot_view.get_qpos_dict()
 
         return ret
@@ -313,13 +352,15 @@ class JointMoveSequence(MoveSequence):
         assert self.move_seg_idx is not None
         if self.move_seg_idx < len(self.move_segments):
             move_seg = self.move_segments[self.move_seg_idx]
-            t = min(1.0, elapsed_time / move_seg.duration)
-
-            curr_target_qpos = {**move_seg.start_qpos}
-            for k in move_seg.end_qpos:
-                q0 = np.asarray(move_seg.start_qpos[k])
-                q1 = np.asarray(move_seg.end_qpos[k])
-                curr_target_qpos[k] = q0 + (q1 - q0) * t
+            if isinstance(move_seg, JointTrajectorySegment):
+                curr_target_qpos = move_seg.qpos_at(elapsed_time)
+            else:
+                t = minjerk(elapsed_time / move_seg.duration)
+                curr_target_qpos = {**move_seg.start_qpos}
+                for k in move_seg.end_qpos:
+                    q0 = np.asarray(move_seg.start_qpos[k])
+                    q1 = np.asarray(move_seg.end_qpos[k])
+                    curr_target_qpos[k] = q0 + (q1 - q0) * t
         else:
             move_seg = self.move_segments[-1]
             curr_target_qpos = {**move_seg.end_qpos}

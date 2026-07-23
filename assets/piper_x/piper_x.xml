@@ -52,6 +52,9 @@
     <mesh name="gripper_base" file="gripper_base.stl"/>
     <mesh name="gripper_link1" file="gripper_link1.stl"/>
     <mesh name="gripper_link2" file="gripper_link2.stl"/>
+    <!-- printed DC1 wrist-cam mount; CAD is mm in the gripper_base frame -->
+    <mesh name="wrist_cam_mount" file="../../../cad/models/arm/wrist_cam_mount.stl"
+          scale="0.001 0.001 0.001"/>
   </asset>
 
   <worldbody>
@@ -97,6 +100,11 @@
                     <inertial pos="-0.000183807 8.05033e-05 0.0321437" quat="0.999976 9.08444e-05 0.00689649 0.000788512" mass="0.45" diaginertia="0.000929442 0.000714469 0.000394318"/>
                     <geom class="visual" mesh="gripper_base" material="piper_grip"/>
                     <geom class="collision" mesh="gripper_base"/>
+                    <!-- camera mount bracket (visual only; clamps the wrist boss,
+                         same frame as the STL; slid 5 mm toward the fingers, matching
+                         mount_z_shift 12->17 in the CAD) -->
+                    <geom class="visual" mesh="wrist_cam_mount" material="piper_dark"
+                          pos="0 0 0.005"/>
                     <!-- TCP: +z = approach axis. 0.12 m out from gripper_base,
                          toward the fingertip end of the pads (collision pads span
                          approach-z 0.059..0.136; grip centre 0.10 gripped too deep);

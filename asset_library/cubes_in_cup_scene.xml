@@ -17,8 +17,14 @@
     <model name="cup_model" file="cup/cup.xml"/>
     <texture name="floor_tex" type="2d" builtin="checker" rgb1="0.2 0.25 0.3" rgb2="0.15 0.2 0.25"
              width="512" height="512"/>
-    <material name="floor_mat" texture="floor_tex" texrepeat="6 6" texuniform="true" reflectance="0.1"/>
-    <material name="board_mat" rgba="0.55 0.42 0.30 1"/>
+    <!-- floor must NOT be reflective: the renderer mirrors only the first
+         reflective geom, and the floor would steal the slot from board2 -->
+    <material name="floor_mat" texture="floor_tex" texrepeat="6 6" texuniform="true"/>
+    <!-- glossy black boards. MuJoCo's classic renderer mirrors only ONE
+         reflective geom per scene, so the shelf (board2, where cubes + cup
+         live) gets the true reflection; board1 is specular-only black. -->
+    <material name="board_mat" rgba="0.04 0.04 0.04 1" specular="0.05" shininess="0.1"/>
+    <material name="board2_mat" rgba="0.04 0.04 0.04 1" specular="0.05" shininess="0.1" reflectance="0.08"/>
   </asset>
 
   <worldbody>
@@ -29,10 +35,7 @@
     <!-- board 1: main table, top surface at z=0 (arm mounted at its near edge) -->
     <geom name="board1" type="box" pos="0.14 0 -0.0075" size="0.20 0.35 0.0075" material="board_mat"/>
     <!-- board 2: upper shelf, top surface at z=0.13, cantilevered behind -->
-    <geom name="board2" type="box" pos="0.445 0 0.1225" size="0.175 0.35 0.0075" material="board_mat"/>
-    <!-- simple stand legs under board2 (visual only; static) -->
-    <geom name="shelf_leg_l" type="box" pos="0.58 0.30 0.058" size="0.02 0.02 0.058" material="board_mat"/>
-    <geom name="shelf_leg_r" type="box" pos="0.58 -0.30 0.058" size="0.02 0.02 0.058" material="board_mat"/>
+    <geom name="board2" type="box" pos="0.445 0 0.1225" size="0.175 0.35 0.0075" material="board2_mat"/>
 
     <!-- cubes on the shelf (nominal; re-sampled per episode: 1-4 active, extras
          parked on the floor by the task sampler). Seated ~1mm into the shelf

@@ -290,6 +290,70 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
     # (measured in the assembled scene); used to place the CUBE over the cup.
     _GRIP_ALONG_APPROACH = 0.03
 
+    # Cup closer than this (XY center-center) steers the grasp yaw toward it.
+    _NEAR_CUP_XY = 0.15
+
+    def _analytic_grasp_pose(self, pickup_obj, place_receptacle) -> np.ndarray:
+        """Grasp TCP pose from the cube pose, replacing the grasp-library +
+        heuristic-scoring pipeline (whose 45deg poses gripped 2.8 cm off-center
+        and pushed the cube across the shelf during the close).
+
+        pos:   cube center.
+        pitch: fixed 45 deg downward approach.
+        yaw:   0 when the cup is far; when the cup is within _NEAR_CUP_XY, half
+               the cup's bearing off the base->cube line, capped at +/-45 deg
+               (cup at 90deg right -> yaw 45 right). Pointing the approach
+               toward the cup keeps the wrist/forearm on its far side.
+        Tool axes: +z = approach, +y = finger-close axis (kept horizontal).
+        """
+        base = self.task.env.current_robot.robot_view.base.pose[:3, 3]
+        cube = np.asarray(pickup_obj.position)
+        fwd = cube[:2] - base[:2]
+        fwd /= np.linalg.norm(fwd)
+        to_cup = np.asarray(place_receptacle.position[:2]) - cube[:2]
+        dist = np.linalg.norm(to_cup)
+        yaw = 0.0
+        if dist < self._NEAR_CUP_XY:
+            to_cup /= dist
+            bearing = np.arctan2(fwd[0] * to_cup[1] - fwd[1] * to_cup[0], fwd @ to_cup)
+            yaw = np.clip(bearing, -np.pi / 2, np.pi / 2) / 2
+        c, s = np.cos(yaw), np.sin(yaw)
+        heading = np.array([c * fwd[0] - s * fwd[1], s * fwd[0] + c * fwd[1]])
+        c45 = np.sqrt(0.5)
+        grasp = np.eye(4)
+        grasp[:3, 2] = [heading[0] * c45, heading[1] * c45, -c45]
+        grasp[:3, 1] = [-heading[1], heading[0], 0.0]
+        grasp[:3, 0] = np.cross(grasp[:3, 1], grasp[:3, 2])
+        grasp[:3, 3] = cube
+        return grasp
+
+    def _compute_target_poses(self) -> dict[str, np.ndarray]:
+        """Like the base, but the grasp pose is analytic (_analytic_grasp_pose)
+        instead of selected from a pre-authored grasp library."""
+        task_config = self.config.task_config
+        robot_view = self.task.env.current_robot.robot_view
+        om = self.task.env.object_managers[self.task.env.current_batch_index]
+        pickup_obj = om.get_object_by_name(task_config.pickup_obj_name)
+        place_receptacle = om.get_object_by_name(task_config.place_receptacle_name)
+
+        grasp_pose_world = self._analytic_grasp_pose(pickup_obj, place_receptacle)
+
+        target_poses = {}
+        (target_poses["pregrasp"], target_poses["grasp"],
+         target_poses["lift"]) = self._get_grasp_poses(
+            grasp_pose_world=grasp_pose_world, pickup_obj=pickup_obj,
+            place_receptacle=place_receptacle, robot_view=robot_view,
+            task_config=task_config)
+        (target_poses["preplace"], target_poses["place"],
+         target_poses["postplace"]) = self._get_placement_poses(
+            grasp_pose_world=grasp_pose_world, pickup_obj=pickup_obj,
+            place_receptacle=place_receptacle)
+
+        if self.task.viewer is not None:
+            self._show_poses(np.stack(list(target_poses.values()), axis=0), style="tcp")
+            self.task.viewer.sync()
+        return target_poses
+
     def _get_grasp_poses(self, grasp_pose_world, pickup_obj, place_receptacle,
                          robot_view, task_config):
         """pregrasp / grasp / lift. Unlike the base (which drives lift all the way

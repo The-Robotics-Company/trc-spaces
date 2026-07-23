@@ -34,11 +34,21 @@
     <geom name="shelf_leg_l" type="box" pos="0.58 0.30 0.058" size="0.02 0.02 0.058" material="board_mat"/>
     <geom name="shelf_leg_r" type="box" pos="0.58 -0.30 0.058" size="0.02 0.02 0.058" material="board_mat"/>
 
-    <!-- cube on the shelf (nominal; re-sampled per episode). Seated ~1mm into the
-         shelf (z=0.144, not 0.145) so a contact registers at scene setup -- the
-         task sampler's get_supporting_geom needs an actual cube<->board2 contact. -->
+    <!-- cubes on the shelf (nominal; re-sampled per episode: 1-4 active, extras
+         parked on the floor by the task sampler). Seated ~1mm into the shelf
+         (z=0.144, not 0.145) so a contact registers at scene setup -- the task
+         sampler's get_supporting_geom needs an actual cube<->board2 contact. -->
     <frame pos="0.32 0.0 0.144">
       <attach model="cube_model" prefix=""/>
+    </frame>
+    <frame pos="0.36 -0.08 0.144">
+      <attach model="cube_model" prefix="cube2_"/>
+    </frame>
+    <frame pos="0.36 0.08 0.144">
+      <attach model="cube_model" prefix="cube3_"/>
+    </frame>
+    <frame pos="0.39 0.0 0.144">
+      <attach model="cube_model" prefix="cube4_"/>
     </frame>
     <!-- cup on the shelf (nominal; re-sampled per episode). Base seated ~1mm in. -->
     <frame pos="0.30 0.17 0.129">

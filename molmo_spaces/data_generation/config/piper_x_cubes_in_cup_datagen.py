@@ -19,6 +19,7 @@ Reference: examples/custom_assets/datagen.py (red_block custom scene) and
 molmo_spaces/data_generation/config/object_manipulation_datagen_configs.py.
 """
 
+import logging
 from pathlib import Path
 
 import mujoco
@@ -52,6 +53,8 @@ from molmo_spaces.robots.piper_x_config import PiperXRobotConfig
 from molmo_spaces.tasks.pick_and_place_task_sampler import PickAndPlaceTaskSampler
 from molmo_spaces.tasks.pick_task_sampler import PickTaskSampler
 from molmo_spaces.utils.pose import pose_mat_to_7d
+
+log = logging.getLogger(__name__)
 
 # --- paths ------------------------------------------------------------------
 # repo root: molmo_spaces/data_generation/config/<this file> -> parents[3]
@@ -93,17 +96,34 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
     """
 
     RECEPTACLE_NAME = "cup"
+    # all cube bodies in the scene XML; 1-4 are activated per episode
+    CUBE_NAMES = ("cube", "cube2_cube", "cube3_cube", "cube4_cube")
 
     # Shelf sampling regions in the robot base frame, constrained to the PiPER
     # reach sweet spot: board2 top spans x in [0.27, 0.62], y in [-0.35, 0.35] at
     # z=0.13; cuRobo IK at the 45° grasp orientation solves reliably for
     # x in ~[0.32, 0.40], |y| <= ~0.13, z up to ~0.30 m.
-    REGION_X = (0.33, 0.40)
-    REGION_Y = (-0.12, 0.12)
+    # Sampling region for BOTH the cup and the cubes: the ENTIRE upper board
+    # (board2: x 0.27..0.62, y +/-0.35) minus a 2 cm edge margin, capped at the
+    # MEASURED reach radius. 2 cm-grid IK sweeps showed: grasp+pregrasp solve
+    # everywhere up to r~0.67 m (638/648 cells, far corners fail), and the
+    # level-wrist place poses solve on ALL 648/648 cells (r up to 0.70).
+    BOARD_X = (0.29, 0.60)
+    BOARD_Y = (-0.33, 0.33)
+    MAX_REACH_XY = 0.65
     CUBE_Z = 0.144  # cube center; seated ~1 mm into shelf so a contact registers
     CUP_Z = 0.129  # cup body origin; base seated ~1 mm into shelf
-    MIN_CUBE_CUP = 0.13  # min XY center-center distance
+    # Layout rules: the cup is sampled first; cubes may not lie between the two
+    # front-direction (+x) lines 5 cm to either side of the cup's wall — the
+    # cup's front-back lane stays clear of cubes. Cubes are >= 10 cm apart.
+    CUP_RADIUS = 0.045  # cup outer radius (AABB/2)
+    CUP_LANE_CLEAR = 0.05  # lateral clearance from the cup wall to the lines
+    MIN_CUBE_CUBE = 0.10  # min XY center-center distance cube<->cube
     _MAX_PLACE_TRIES = 200
+    # parking spots for inactive cubes: on the floor behind the shelf legs,
+    # far outside the workspace and the wrist camera's view of the shelf
+    _PARK_XY = ((0.9, -0.6), (0.9, -0.45), (0.9, 0.45), (0.9, 0.6))
+    _PARK_Z = -0.725  # floor top is -0.74; cube half-size 0.015
 
     def __init__(self, config) -> None:
         super().__init__(config)
@@ -130,9 +150,15 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
     def _filter_place_target(self, env, pickup_obj_name, place_target_name) -> bool:
         return True
 
-    def _sample_shelf_xy(self) -> np.ndarray:
-        return np.array([np.random.uniform(*self.REGION_X),
-                         np.random.uniform(*self.REGION_Y)])
+    def _sample_cup_xy(self) -> np.ndarray:
+        return self._sample_cube_xy()  # measured place-reach covers the board
+
+    def _sample_cube_xy(self) -> np.ndarray:
+        while True:
+            xy = np.array([np.random.uniform(*self.BOARD_X),
+                           np.random.uniform(*self.BOARD_Y)])
+            if np.linalg.norm(xy) <= self.MAX_REACH_XY:
+                return xy
 
     @staticmethod
     def _pose(x: float, y: float, z: float, yaw: float) -> np.ndarray:
@@ -141,8 +167,38 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
         pose[:3, :3] = R.from_euler("z", yaw).as_matrix()
         return pose
 
+    def _try_place_cubes(self, env, cup_xy: np.ndarray, n_cubes: int) -> list[str]:
+        """Place up to n_cubes on the shelf (rest parked on the floor).
+
+        Constraints: outside the cup's front-direction lane (|y - cup_y| >=
+        CUP_RADIUS + CUP_LANE_CLEAR) and >= MIN_CUBE_CUBE pairwise.
+        Returns the names of the cubes actually placed.
+        """
+        lane_half = self.CUP_RADIUS + self.CUP_LANE_CLEAR
+        placed_xy: list[np.ndarray] = []
+        active: list[str] = []
+        for i, name in enumerate(self.CUBE_NAMES):
+            body = create_mlspaces_body(env.current_data, name)
+            if len(active) < n_cubes:
+                for _ in range(self._MAX_PLACE_TRIES):
+                    xy = self._sample_cube_xy()
+                    if abs(xy[1] - cup_xy[1]) < lane_half:
+                        continue
+                    if any(np.linalg.norm(xy - p) < self.MIN_CUBE_CUBE for p in placed_xy):
+                        continue
+                    body.pose = self._pose(xy[0], xy[1], self.CUBE_Z,
+                                           yaw=np.random.uniform(-np.pi, np.pi))
+                    placed_xy.append(xy)
+                    active.append(name)
+                    break
+            if name not in active:
+                px, py = self._PARK_XY[i]
+                body.pose = self._pose(px, py, self._PARK_Z, yaw=0.0)
+        return active
+
     def _sample_and_place_robot(self, env: CPUMujocoEnv) -> None:
-        """Keep the fixed-base arm at the origin; sample cube + cup on the shelf."""
+        """Keep the fixed-base arm at the origin; sample 1-4 cubes + the cup on
+        the shelf (surplus cubes parked on the floor, out of the workspace)."""
         task_cfg = self.config.task_config
         robot_view = env.current_robot.robot_view
 
@@ -150,36 +206,62 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
         # just record the base pose.
         task_cfg.robot_base_pose = pose_mat_to_7d(robot_view.base.pose).tolist()
 
-        cup_xy = self._sample_shelf_xy()
+        n_cubes = int(np.random.randint(1, len(self.CUBE_NAMES) + 1))
         cup = create_mlspaces_body(env.current_data, self.place_receptacle_name)
+
+        # cup first; the lane rule always leaves feasible cube space on the board
+        cup_xy = self._sample_cup_xy()
         cup.pose = self._pose(cup_xy[0], cup_xy[1], self.CUP_Z,
                               yaw=np.random.uniform(-np.pi, np.pi))
-
-        cube_xy = self._sample_shelf_xy()
-        for _ in range(self._MAX_PLACE_TRIES):
-            if np.linalg.norm(cube_xy - cup_xy) >= self.MIN_CUBE_CUP:
-                break
-            cube_xy = self._sample_shelf_xy()
-        else:
-            # MIN_CUBE_CUP is a large fraction of the region diagonal, so the
-            # rejection loop can exhaust; park the cup in the corner farthest
-            # from the cube instead of silently accepting a violating layout
-            corners = np.array([[x, y] for x in self.REGION_X for y in self.REGION_Y])
-            cup_xy = corners[np.argmax(np.linalg.norm(corners - cube_xy, axis=1))]
-            cup.pose = self._pose(cup_xy[0], cup_xy[1], self.CUP_Z,
-                                  yaw=np.random.uniform(-np.pi, np.pi))
-        cube = create_mlspaces_body(env.current_data, task_cfg.pickup_obj_name)
-        cube.pose = self._pose(cube_xy[0], cube_xy[1], self.CUBE_Z,
-                               yaw=np.random.uniform(-np.pi, np.pi))
+        active = self._try_place_cubes(env, cup_xy, n_cubes)
+        if len(active) < n_cubes:
+            log.info(f"placed {len(active)}/{n_cubes} cubes (region too crowded)")
 
         mujoco.mj_fwdPosition(env.current_model, env.current_data)
 
-        # The policy reads the cup pose live at plan time; these are bookkeeping.
+        # The policy queues shelf cubes dynamically and reads poses live at plan
+        # time; pickup_obj_name / these poses are the first target + bookkeeping.
+        task_cfg.pickup_obj_name = active[0]
+        cube = create_mlspaces_body(env.current_data, active[0])
         task_cfg.pickup_obj_start_pose = pose_mat_to_7d(cube.pose).tolist()
         goal_pose = pose_mat_to_7d(cube.pose)
         goal_pose[2] += 0.05
         task_cfg.pickup_obj_goal_pose = goal_pose.tolist()
         task_cfg.place_receptacle_start_pose = pose_mat_to_7d(cup.pose).tolist()
+
+
+class _PlaceCorrectingSequence(JointMoveSequence):
+    """Lift/carry/place sequence that re-aims the final descent as it starts.
+
+    The precomputed place qpos assumes the cube sits a fixed distance ahead of
+    the TCP; the real in-hand pose differs (the cube seats during the close and
+    sags during the carry). When the "place" segment becomes active — the arm
+    is at preplace, wrist already level, cube settled — ``correct_fn`` (called
+    with this sequence) measures the cube in the TCP frame and re-plans the
+    descent segment(s) so the CUBE center descends onto the cup axis.
+    """
+
+    def __init__(self, *args, correct_fn=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._correct_fn = correct_fn
+        self._corrected = False
+
+    def execute(self) -> bool:
+        done = super().execute()
+        if (
+            not self._corrected
+            and self._correct_fn is not None
+            and self.move_seg_idx is not None
+            and self.move_seg_idx < len(self.move_segments)
+            and self.move_segments[self.move_seg_idx].name == "place"
+        ):
+            self._corrected = True
+            self._correct_fn(self)
+        return done
+
+    def reset(self):
+        super().reset()
+        self._corrected = False
 
 
 class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
@@ -211,12 +293,71 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
                     asset_root_path=str(_CUROBO_MESHES),
                     collision_spheres_path=str(_CUROBO_SPHERES),
                     num_ik_seeds=64,
+                    # default 0.2 m makes the cup repel trajectories across most
+                    # of this shelf workspace -> huge detour arcs; 3 cm keeps the
+                    # penalty local to actual near-collisions
+                    collision_activation_distance=0.03,
                 )
             )
         return cls._planner
 
+    def reset(self, reset_retries: bool = True):
+        if self.task.episode_step_count == 0:
+            self._skip_cubes: set[str] = set()  # fresh episode, no blacklist
+        super().reset(reset_retries)
+
+    def _next_shelf_cube(self) -> str | None:
+        """Nearest not-yet-placed cube still standing on the shelf, or None.
+
+        A cube counts as done/unpickable when it is within 7 cm of the cup axis
+        (in or against the cup), off shelf height (parked or knocked down), or
+        blacklisted after repeated planning failures.
+        """
+        om = self.task.env.object_managers[self.task.env.current_batch_index]
+        cup = om.get_object_by_name(self.config.task_config.place_receptacle_name)
+        cup_xy = np.asarray(cup.position[:2])
+        best, best_d = None, np.inf
+        for name in PiperXCubesInCupTaskSampler.CUBE_NAMES:
+            if name in self._skip_cubes:
+                continue
+            try:
+                obj = om.get_object_by_name(name)
+            except Exception:  # noqa: BLE001
+                continue
+            p = np.asarray(obj.position)
+            if not (0.135 < p[2] < 0.20):
+                continue
+            if np.linalg.norm(p[:2] - cup_xy) < 0.07:
+                continue
+            d = float(np.linalg.norm(p[:2]))
+            if d < best_d:
+                best, best_d = name, d
+        return best
+
+    def _advance_to_next_cube(self) -> bool:
+        """Retarget to the next shelf cube and replan; False when none are left."""
+        while True:
+            nxt = self._next_shelf_cube()
+            if nxt is None:
+                return False
+            self.config.task_config.pickup_obj_name = nxt
+            log.info(f"Next cube target: {nxt}")
+            try:
+                self.reset(reset_retries=True)
+                return True
+            except ValueError as e:
+                log.warning(f"Planning for {nxt} failed ({e}); skipping it")
+                self._skip_cubes.add(nxt)
+
     def get_action(self, info):
         action = super().get_action(info)
+        if action.get("done"):
+            # current cube's script finished (or its retries ran out) — chain to
+            # the next shelf cube instead of ending the episode
+            if action.get("success") is False:
+                self._skip_cubes.add(self.config.task_config.pickup_obj_name)
+            if self._advance_to_next_cube():
+                action = super().get_action(info)
         # Latch the gripper command. JointMoveSequence.get_current_action drops
         # gripper move groups, so without this the gripper controller reverts to
         # its reset (closed) target during joint moves and never opens for the
@@ -262,17 +403,20 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
                          for p in poses], dtype=bool)
         return bool(mask[0]) if single else mask
 
-    def _sync_cup_obstacle(self, place_receptacle) -> str:
-        """Register/refresh the cup as a cuRobo world obstacle (AABB cuboid).
+    def _sync_cup_obstacle(self, place_receptacle) -> list[str]:
+        """Register/refresh the cup as a HOLLOW cuRobo obstacle set.
 
-        Built from the live AABB rather than planner.update_world(), which uses
-        object.pose directly as the cuboid pose — for the cup that is the BASE
-        frame origin, sinking the obstacle box half a cup-height too low and
-        leaving the rim unprotected. Cuboid poses must be the volume center.
+        A single solid AABB makes every over-the-rim pose "in collision", which
+        forced collision checking OFF for the whole place phase. Instead the cup
+        is approximated by a ring of thin wall cuboids around its AABB cylinder
+        plus a bottom slab — the mouth stays free space, so cup collision can
+        stay enabled for EVERY IK solve and motion plan, place phase included.
 
-        Poses go to cuRobo in the robot base frame; the PiPER-X base sits at the
-        world origin in this task (base_size=None), so world poses pass through
-        unchanged. Revisit if the robot base ever moves.
+        Built from the live AABB (object.pose is the base-frame origin, half a
+        cup-height too low for a volume-centered cuboid). Poses go to cuRobo in
+        the robot base frame; the PiPER-X base sits at the world origin in this
+        task (base_size=None), so world poses pass through unchanged. Revisit if
+        the robot base ever moves.
         """
         from curobo.geom.types import Cuboid, WorldConfig
 
@@ -280,15 +424,63 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
 
         data = self.task.env.current_data
         center, size = body_aabb(data.model, data, place_receptacle.object_id)
-        cuboid = Cuboid(name=place_receptacle.name,
-                        pose=[*np.asarray(center).tolist(), 1.0, 0.0, 0.0, 0.0],
-                        dims=np.asarray(size).tolist())
-        self._get_planner().motion_gen.update_world(WorldConfig(cuboid=[cuboid]))
-        return place_receptacle.name
+        cx, cy, cz = np.asarray(center).tolist()
+        radius = float(min(size[0], size[1])) / 2.0
+        height = float(size[2])
+        thickness = 0.012
+        n_walls = 8
+        # bottom slab: inscribed square (side 2R/sqrt(2)) — a circumscribed 2Rx2R
+        # square pokes phantom corners ~0.4R beyond the round cup; the wall ring
+        # covers the perimeter anyway
+        bottom_side = 2.0 * radius / np.sqrt(2.0)
+        cuboids = [
+            Cuboid(
+                name=f"{place_receptacle.name}_bottom",
+                pose=[cx, cy, cz - height / 2 + thickness / 2, 1.0, 0.0, 0.0, 0.0],
+                dims=[bottom_side, bottom_side, thickness],
+            )
+        ]
+        chord = 2.0 * radius * np.tan(np.pi / n_walls) * 1.15  # slight overlap
+        for i in range(n_walls):
+            ang = 2.0 * np.pi * i / n_walls
+            r_mid = radius - thickness / 2.0
+            yaw = ang + np.pi / 2.0  # box long axis tangent to the ring
+            cuboids.append(
+                Cuboid(
+                    name=f"{place_receptacle.name}_wall{i}",
+                    pose=[cx + r_mid * np.cos(ang), cy + r_mid * np.sin(ang), cz,
+                          np.cos(yaw / 2.0), 0.0, 0.0, np.sin(yaw / 2.0)],
+                    dims=[chord, thickness, height],
+                )
+            )
+        # every cube EXCEPT the current pickup target is an obstacle too (its
+        # live AABB): neighbours on the shelf and cubes already in the cup
+        om = self.task.env.object_managers[self.task.env.current_batch_index]
+        for name in PiperXCubesInCupTaskSampler.CUBE_NAMES:
+            if name == self.config.task_config.pickup_obj_name:
+                continue
+            try:
+                obj = om.get_object_by_name(name)
+            except Exception:  # noqa: BLE001
+                continue
+            if obj.position[2] < 0.0:
+                continue  # parked on the floor, far out of the workspace
+            c, s = body_aabb(data.model, data, obj.object_id)
+            cuboids.append(Cuboid(name=f"obs_{name}",
+                                  pose=[*np.asarray(c).tolist(), 1.0, 0.0, 0.0, 0.0],
+                                  dims=np.asarray(s).tolist()))
 
-    # The cube sits ~0.03 m along the tool +z (approach) beyond the TCP/grasp_site
-    # (measured in the assembled scene); used to place the CUBE over the cup.
+        self._get_planner().motion_gen.update_world(WorldConfig(cuboid=cuboids))
+        self._cup_obstacle_cuboids = [(c.pose, c.dims) for c in cuboids]  # for viz
+        return [c.name for c in cuboids]
+
+    # Nominal in-hand offset: cube ~0.03 m along tool +z beyond the TCP/grasp_site.
+    # Used only for the precomputed (feasibility-checked) place poses; the actual
+    # descent is re-aimed from the measured offset by _correct_place_descent.
     _GRIP_ALONG_APPROACH = 0.03
+
+    # Cube-center release height above the cup rim.
+    _DROP_ABOVE_RIM = 0.04
 
     # Cup closer than this (XY center-center) steers the grasp yaw toward it.
     _NEAR_CUP_XY = 0.15
@@ -300,16 +492,18 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
 
         pos:   cube center.
         pitch: fixed 45 deg downward approach.
-        yaw:   0 when the cup is far; when the cup is within _NEAR_CUP_XY, half
-               the cup's bearing off the base->cube line, capped at +/-45 deg
-               (cup at 90deg right -> yaw 45 right). Pointing the approach
-               toward the cup keeps the wrist/forearm on its far side.
+        yaw:   0 = the base's forward (+x) axis — the direction the arm faces —
+               independent of where the cube is. When the cup is within
+               _NEAR_CUP_XY, yaw offsets left/right by half the cup's bearing
+               off that axis, capped at +/-45 deg (cup at 90deg right -> yaw 45
+               right); pointing the approach toward the cup keeps the
+               wrist/forearm on its far side.
         Tool axes: +z = approach, +y = finger-close axis (kept horizontal).
         """
-        base = self.task.env.current_robot.robot_view.base.pose[:3, 3]
         cube = np.asarray(pickup_obj.position)
-        fwd = cube[:2] - base[:2]
-        fwd /= np.linalg.norm(fwd)
+        # yaw-0 reference: the base's forward axis, regardless of the cube
+        fwd = self.task.env.current_robot.robot_view.base.pose[:2, 0]
+        fwd = fwd / np.linalg.norm(fwd)
         to_cup = np.asarray(place_receptacle.position[:2]) - cube[:2]
         dist = np.linalg.norm(to_cup)
         yaw = 0.0
@@ -337,6 +531,7 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
         place_receptacle = om.get_object_by_name(task_config.place_receptacle_name)
 
         grasp_pose_world = self._analytic_grasp_pose(pickup_obj, place_receptacle)
+        self._pickup_obj = pickup_obj  # live handle for the place-descent correction
 
         target_poses = {}
         (target_poses["pregrasp"], target_poses["grasp"],
@@ -350,7 +545,11 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
             place_receptacle=place_receptacle)
 
         if self.task.viewer is not None:
-            self._show_poses(np.stack(list(target_poses.values()), axis=0), style="tcp")
+            # only the two poses that matter: grasp (magenta) and place (cyan).
+            # Colors deliberately avoid red/yellow/green, which the collision
+            # overlay uses for penetration/proximity/clear.
+            self._show_poses(target_poses["grasp"][None], style="tcp", color=(1, 0, 1, 1))
+            self._show_poses(target_poses["place"][None], style="tcp", color=(0, 1, 1, 1))
             self.task.viewer.sync()
         return target_poses
 
@@ -361,26 +560,28 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
         reach), lift is just a modest straight-up raise to clear the shelf while
         keeping the grasp orientation; the level place poses handle the cup height.
         """
-        # cup as collision obstacle for the PICK side only: approach/grasp/lift
-        # configs must clear the cup. The place side disables it (the level-place
-        # wrist must reach over the rim, and the fingertips dip below it).
-        cup_name = self._sync_cup_obstacle(place_receptacle)
-        self._cup_obstacle_name = cup_name  # reused by _compute_trajectory
-        self._get_planner().enable_obstacles([cup_name], True)
+        # hollow cup registered once per plan; cup collision stays enabled for
+        # EVERY IK solve and motion plan in the episode (the world contains
+        # only the cup, so near-contact cube/shelf configs are unaffected)
+        self._get_planner().enable_obstacles(self._sync_cup_obstacle(place_receptacle), True)
+        def _require_ik(pose, name):
+            if self.check_feasible_ik(pose, check_collision=True):
+                return
+            # split the failure: pure reachability vs the collision constraint
+            reachable = self.check_feasible_ik(pose)
+            raise ValueError(
+                f"IK failed for {name} pose "
+                f"({'collision-blocked' if reachable else 'unreachable'}; "
+                f"pos {pose[:3, 3].round(3)})"
+            )
+
         pregrasp = grasp_pose_world.copy()
         pregrasp[:3, 3] -= self.policy_config.pregrasp_z_offset * pregrasp[:3, 2]
-        if not self.check_feasible_ik(pregrasp, check_collision=True):
-            raise ValueError("IK failed for pregrasp pose")
-        # grasp/lift are near-contact configs (fingers around the cube, wrist
-        # just over the shelf): collision-sphere margins spuriously reject them,
-        # so they get plain reachability checks; path safety comes from the
-        # motion-planned transfer segments
-        if not self.check_feasible_ik(grasp_pose_world):
-            raise ValueError("IK failed for grasp pose")
+        _require_ik(pregrasp, "pregrasp")
+        _require_ik(grasp_pose_world, "grasp")
         lift = grasp_pose_world.copy()
         lift[2, 3] += 0.08  # raise the cube ~8 cm straight up, clear of the shelf
-        if not self.check_feasible_ik(lift):
-            raise ValueError("IK failed for lift pose")
+        _require_ik(lift, "lift")
         return pregrasp, grasp_pose_world, lift
 
     def _get_placement_poses(self, grasp_pose_world, pickup_obj, place_receptacle):
@@ -394,10 +595,6 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
         opening the gripper drops the cube straight down into the cup.
         """
         from molmo_spaces.utils.mj_model_and_data_utils import body_aabb
-
-        # the cup obstacle (enabled for the pick side) must not veto reaching
-        # over its own rim; collision stays off for place-side IK regardless
-        self._get_planner().enable_obstacles([place_receptacle.name], False)
 
         data = self.task.env.current_data
         center, size = body_aabb(data.model, data, place_receptacle.object_id)
@@ -419,11 +616,17 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
             T[:3, 3] = np.array([cx, cy, cz]) - self._GRIP_ALONG_APPROACH * a
             return T
 
+        # stashed for the closed-loop descent correction (_correct_place_descent)
+        self._place_R_level = R_level
+        self._place_cube_target = np.array(
+            [cup_xy[0], cup_xy[1], rim_z + self._DROP_ABOVE_RIM]
+        )
+
         preplace = tcp_for_cube(cup_xy[0], cup_xy[1], rim_z + 0.06)
-        if not self.check_feasible_ik(preplace):
+        if not self.check_feasible_ik(preplace, check_collision=True):
             raise ValueError("IK failed for preplace pose")
-        place = tcp_for_cube(cup_xy[0], cup_xy[1], rim_z + 0.015)
-        if not self.check_feasible_ik(place):
+        place = tcp_for_cube(cup_xy[0], cup_xy[1], rim_z + self._DROP_ABOVE_RIM)
+        if not self.check_feasible_ik(place, check_collision=True):
             raise ValueError("IK failed for place pose")
         postplace = place.copy()
         postplace[2, 3] += 0.06  # retreat straight up
@@ -442,6 +645,87 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
                 return self._handle_failure()
         return action
 
+    def _plan_transfer_segs(self, name, start_q, pose_world):
+        """Whole collision-free trajectory to a world pose via motion_gen,
+        executed on cuRobo's own timing. The cup obstacle set is always active.
+
+        Returns (list of JointMoveSegments tracing the plan, final joints).
+        The interpolated plan is replayed over ``result.motion_time`` — the
+        duration cuRobo computed to respect the joint velocity/acceleration
+        limits — NOT an imposed duration. Knots are kept at ~10 Hz (finer than
+        the control loop), so the linear interpolation between adjacent knots
+        is negligible.
+        """
+        base_inv = np.linalg.inv(self.robot_view.base.pose)
+        goal7 = pose_mat_to_7d(base_inv @ pose_world)
+        traj, result = self._get_planner().motion_plan(list(start_q), [goal7.tolist()])
+        if not bool(result.success.item()):
+            raise ValueError(f"cuRobo motion plan failed for {name}")
+        traj = np.asarray(traj)
+        motion_time = max(float(result.motion_time), 0.5)
+        n_knots = int(motion_time / 0.1) + 2
+        if len(traj) > n_knots:
+            keep = np.linspace(0, len(traj) - 1, n_knots).round().astype(int)
+            traj = traj[keep]
+        dt = motion_time / max(len(traj) - 1, 1)
+        segs = [
+            JointMoveSegment(
+                name=f"{name}_{i}",
+                start_qpos=None if i == 1 else {"arm": np.asarray(traj[i - 1])},
+                end_qpos={"arm": np.asarray(traj[i])},
+                duration_s=dt,
+            )
+            for i in range(1, len(traj))
+        ]
+        return segs, list(traj[-1])
+
+    def _correct_place_descent(self, seq: "_PlaceCorrectingSequence") -> None:
+        """Re-aim the place descent from the measured in-hand cube pose.
+
+        Runs once, when the descent segment becomes active (arm at preplace,
+        wrist level, cube settled in the closed gripper). The cube center is
+        measured in the TCP frame and the place TCP pose is recomputed so the
+        cube — not the nominal _GRIP_ALONG_APPROACH point — ends up centered
+        on the cup axis. The descent stays a straight-line joint move; only
+        its endpoint is re-solved. Keeps the precomputed qpos if IK fails.
+        """
+        gripper = self.robot_view.get_gripper(self.robot_view.get_gripper_movegroup_ids()[0])
+        T_tcp = gripper.leaf_frame_to_world
+        cube = np.asarray(self._pickup_obj.position)
+        offset_tcp = T_tcp[:3, :3].T @ (cube - T_tcp[:3, 3])
+
+        R_level = self._place_R_level
+        place = np.eye(4)
+        place[:3, :3] = R_level
+        place[:3, 3] = self._place_cube_target - R_level @ offset_tcp
+        log.info(
+            f"Place descent corrected: in-hand cube offset (TCP frame) {offset_tcp.round(4)}"
+        )
+
+        # The descent is a few cm straight down over the cup mouth: keep it a
+        # straight-line joint move (seeded IK stays on the preplace IK branch).
+        # motion_gen is deliberately NOT used here — for near-zero Cartesian
+        # gaps it may pick a distant IK branch and swing the whole arm.
+        place_seg = seq.move_segments[-1]
+        jc = (self._ik_world(place, self._arm_seed(), check_collision=True)
+              or self._ik_world(place, None, check_collision=True))
+        if jc is None:
+            log.warning("Place-descent correction IK failed; keeping precomputed pose")
+            return
+        place_seg.end_qpos = {"arm": np.asarray(jc)}
+        q_place = jc
+
+        # keep the retreat straight up from the corrected place pose
+        retreat_seg = getattr(self, "_retreat_seg", None)
+        if retreat_seg is not None:
+            postplace = place.copy()
+            postplace[2, 3] += 0.06
+            jp = (self._ik_world(postplace, list(q_place), check_collision=True)
+                  or self._ik_world(postplace, None, check_collision=True))
+            if jp is not None:
+                retreat_seg.start_qpos = None  # filled from live qpos at segment start
+                retreat_seg.end_qpos = {"arm": np.asarray(jp)}
+
     def _compute_trajectory(self):
         """Long transfer moves are planned by cuRobo motion_gen as whole
         collision-free trajectories (cup registered as obstacle); the short
@@ -452,77 +736,41 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
 
         pc = self.policy_config
         home_seed = robot_view.get_move_group("arm").joint_pos.tolist()
-        base_inv = np.linalg.inv(robot_view.base.pose)
-        cup_name = getattr(self, "_cup_obstacle_name", None)
 
         def jseg(name, end_qpos, dur, start_qpos=None):
             return JointMoveSegment(name=name, start_qpos=start_qpos,
                                     end_qpos=end_qpos, duration_s=dur)
 
-        def plan_jsegs(name, start_q, pose_world, total_dur,
-                       avoid_cup=True, max_waypoints=12):
-            """Whole collision-free trajectory to a world pose via motion_gen.
-
-            Returns (list of JointMoveSegments tracing the plan, final joints).
-            The interpolated plan is downsampled to <= max_waypoints knots;
-            JointMoveSequence interpolates linearly between adjacent knots,
-            which stays within a knot spacing of the planned path.
-            """
-            if cup_name is not None:
-                self._get_planner().enable_obstacles([cup_name], avoid_cup)
-            goal7 = pose_mat_to_7d(base_inv @ pose_world)
-            traj, result = self._get_planner().motion_plan(
-                list(start_q), [goal7.tolist()])
-            if not bool(result.success.item()):
-                raise ValueError(f"cuRobo motion plan failed for {name}")
-            traj = np.asarray(traj)
-            if len(traj) > max_waypoints:
-                keep = np.linspace(0, len(traj) - 1, max_waypoints).round().astype(int)
-                traj = traj[keep]
-            dt = total_dur / max(len(traj) - 1, 1)
-            segs = []
-            for i in range(1, len(traj)):
-                segs.append(jseg(
-                    f"{name}_{i}", {"arm": np.asarray(traj[i])}, dt,
-                    start_qpos=None if i == 1 else {"arm": np.asarray(traj[i - 1])},
-                ))
-            return segs, list(traj[-1])
-
         # home -> pregrasp: planned around the cup
-        pregrasp_segs, q_pregrasp = plan_jsegs(
-            "pregrasp", home_seed, target_poses["pregrasp"], 2.5, avoid_cup=True)
+        pregrasp_segs, q_pregrasp = self._plan_transfer_segs(
+            "pregrasp", home_seed, target_poses["pregrasp"])
         qs: dict[str, dict] = {"pregrasp": {"arm": np.asarray(q_pregrasp)}}
 
-        # remaining straight-line waypoints: seed-chained IK for continuity,
+        # remaining straight-line waypoints: seed-chained collision-checked IK,
         # falling back to home seed then cuRobo's 64-seed solve
         seed = list(q_pregrasp)
         for name in ["grasp", "lift", "preplace", "place", "postplace"]:
-            jc = (self._ik_world(target_poses[name], seed)
-                  or self._ik_world(target_poses[name], home_seed)
-                  or self._ik_world(target_poses[name], None))
+            jc = (self._ik_world(target_poses[name], seed, check_collision=True)
+                  or self._ik_world(target_poses[name], home_seed, check_collision=True)
+                  or self._ik_world(target_poses[name], None, check_collision=True))
             if jc is None:
                 raise ValueError(f"cuRobo IK failed for {name} pose")
             qs[name] = {"arm": np.asarray(jc)}
             seed = list(jc)
 
-        # lift -> preplace carry: planned; prefer avoiding the cup, but fall
-        # back to a direct plan if the rim clearance makes it infeasible
-        # (preplace hovers only 6 cm over the rim)
-        try:
-            carry_segs, q_preplace = plan_jsegs(
-                "preplace", qs["lift"]["arm"].tolist(),
-                target_poses["preplace"], 2.0, avoid_cup=True)
-        except ValueError:
-            carry_segs, q_preplace = plan_jsegs(
-                "preplace", qs["lift"]["arm"].tolist(),
-                target_poses["preplace"], 2.0, avoid_cup=False)
+        # lift -> preplace carry: planned around the cup (the hollow cup model
+        # keeps the 6-cm-over-rim preplace goal feasible — no disable fallback)
+        carry_segs, q_preplace = self._plan_transfer_segs(
+            "preplace", qs["lift"]["arm"].tolist(), target_poses["preplace"])
         qs["preplace"] = {"arm": np.asarray(q_preplace)}
         # re-chain the place descent from the planned carry endpoint
-        jc = (self._ik_world(target_poses["place"], q_preplace)
-              or self._ik_world(target_poses["place"], None))
+        jc = (self._ik_world(target_poses["place"], q_preplace, check_collision=True)
+              or self._ik_world(target_poses["place"], None, check_collision=True))
         if jc is None:
             raise ValueError("cuRobo IK failed for place pose")
         qs["place"] = {"arm": np.asarray(jc)}
+
+        self._retreat_seg = jseg("retreat", qs["postplace"], 1.0, start_qpos=qs["place"])
 
         return [
             GripperAction(robot_view, True, 0.0),
@@ -534,7 +782,7 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
                 ],
             ),
             GripperAction(robot_view, False, pc.gripper_close_duration),
-            JointMoveSequence(
+            _PlaceCorrectingSequence(
                 robot_view, pc.move_settle_time,
                 is_holding_object=True,
                 gripper_empty_threshold=pc.gripper_empty_threshold,
@@ -543,11 +791,12 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
                     *carry_segs,
                     jseg("place", qs["place"], 1.5, start_qpos=qs["preplace"]),
                 ],
+                correct_fn=self._correct_place_descent,
             ),
             GripperAction(robot_view, True, pc.gripper_open_duration),
             JointMoveSequence(
                 robot_view, pc.move_settle_time,
-                move_segments=[jseg("retreat", qs["postplace"], 1.0, start_qpos=qs["place"])],
+                move_segments=[self._retreat_seg],
             ),
             JointMoveSequence(
                 robot_view, pc.move_settle_time,
@@ -566,8 +815,9 @@ class PiperXCubesInCupDataGenConfig(PickAndPlaceDataGenConfig):
     seed: int | None = 0
     filter_for_successful_trajectories: bool = False
     use_passive_viewer: bool = False
-    # level-place trajectory is a few s longer than the default 400-step budget
-    task_horizon: int | None = 600
+    # one pick-place cycle is ~220-260 steps; budget 4 cubes + retry slack
+    # (600 truncated 4-cube episodes after the 3rd cube)
+    task_horizon: int | None = 1400
 
     # Fixed-base tabletop: no 0.7 m pedestal (arm base at z=0, matching board1 top).
     robot_config: PiperXRobotConfig = PiperXRobotConfig(base_size=None)
@@ -597,6 +847,11 @@ class PiperXCubesInCupDataGenConfig(PickAndPlaceDataGenConfig):
         # PiPER finger servo needs ~1.5 s to travel from open (0.05) and clamp a
         # 3 cm cube; the default 0.5 s left the fingers still closing at lift.
         gripper_close_duration=1.5,
+        # "closed" now targets a 2 cm opening (gentle grip), so an EMPTY
+        # gripper rests at ~0.020 m while the held 2.9 cm cube reads ~0.029 m.
+        # Empty detection fires below range_min (0.002) + threshold = 0.024 —
+        # between the two, with ~4 mm margin each way.
+        gripper_empty_threshold=0.022,
     )
 
     output_dir: Path = Path("experiment_output") / "datagen" / "piper_x_cubes_in_cup_v1"

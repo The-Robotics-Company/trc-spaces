@@ -71,13 +71,14 @@ robot_cfg:
         mesh_link_names: null
 
         extra_links: {
-            # TCP / grasp frame: 0.10 m along +z of gripper_base = the finger-pad
-            # grip center (must match the MJCF grasp_site). Was 0.14, which sat past
-            # the fingertips so the gripper closed on empty space beyond the cube.
+            # TCP / grasp frame: 0.12 m along +z of gripper_base, toward the
+            # fingertip end of the pads (must match the MJCF grasp_site). History:
+            # 0.14 sat past the fingertips (closed on empty space); 0.10 was the
+            # pad grip center but gripped too deep.
             "grasp_site": {
                 "parent_link_name": "gripper_base",
                 "link_name": "grasp_site",
-                "fixed_transform": [0.0, 0.0, 0.10, 1.0, 0.0, 0.0, 0.0],  # xyz + wxyz
+                "fixed_transform": [0.0, 0.0, 0.12, 1.0, 0.0, 0.0, 0.0],  # xyz + wxyz
                 "joint_type": "FIXED",
                 "joint_name": "grasp_site_joint",
             },
@@ -86,7 +87,7 @@ robot_cfg:
             "attached_object": {
                 "parent_link_name": "gripper_base",
                 "link_name": "attached_object",
-                "fixed_transform": [0.0, 0.0, 0.10, 1.0, 0.0, 0.0, 0.0],
+                "fixed_transform": [0.0, 0.0, 0.12, 1.0, 0.0, 0.0, 0.0],
                 "joint_type": "FIXED",
                 "joint_name": "attach_joint",
             },

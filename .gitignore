@@ -45,6 +45,7 @@ checkpoints/
 typings
 eval_output/
 experiment_output
+results/
 
 
 mlspaces_tests/**/test_output

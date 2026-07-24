@@ -61,6 +61,27 @@ collision_spheres:
     radius: 0.025958062261343003
   - center: [0.0008846279815770686, 0.06316942721605301, 0.05660868436098099]
     radius: 0.02417177252471447
+  # DC1 wrist-cam mount (ring clamp + boom + camera board): 9 spheres fitted
+  # to wrist_cam_mount.stl vertices (k-means, r = p90 + 3 mm), including the
+  # 5 mm forward shift. Must match the sphere geoms in assets/piper_x/piper_x.xml.
+  - center: [-0.0900, 0.0213, 0.0348]
+    radius: 0.0169
+  - center: [0.0372, 0.0011, 0.0370]
+    radius: 0.0225
+  - center: [-0.0367, 0.0067, 0.0398]
+    radius: 0.0262
+  - center: [-0.0333, -0.0188, 0.0318]
+    radius: 0.0228
+  - center: [-0.0622, -0.0141, 0.0150]
+    radius: 0.0151
+  - center: [-0.0888, -0.0193, 0.0324]
+    radius: 0.0200
+  - center: [0.0019, 0.0303, 0.0369]
+    radius: 0.0281
+  - center: [0.0106, -0.0290, 0.0367]
+    radius: 0.0257
+  - center: [-0.0666, 0.0105, 0.0159]
+    radius: 0.0212
   gripper_link1:
   - center: [-0.008409380912780762, -0.07649999856948853, 0.023402700200676918]
     radius: 0.009999999888241292

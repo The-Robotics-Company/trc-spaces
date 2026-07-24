@@ -100,11 +100,22 @@
                     <inertial pos="-0.000183807 8.05033e-05 0.0321437" quat="0.999976 9.08444e-05 0.00689649 0.000788512" mass="0.45" diaginertia="0.000929442 0.000714469 0.000394318"/>
                     <geom class="visual" mesh="gripper_base" material="piper_grip"/>
                     <geom class="collision" mesh="gripper_base"/>
-                    <!-- camera mount bracket (visual only; clamps the wrist boss,
-                         same frame as the STL; slid 5 mm toward the fingers, matching
+                    <!-- camera mount bracket (clamps the wrist boss, same frame as
+                         the STL; slid 5 mm toward the fingers, matching
                          mount_z_shift 12->17 in the CAD) -->
                     <geom class="visual" mesh="wrist_cam_mount" material="piper_dark"
                           pos="0 0 0.005"/>
+                    <!-- mount collision: same 9 spheres as the cuRobo model
+                         (curobo_config/piper_x_spheres.yml, gripper_base) -->
+                    <geom class="collision" type="sphere" pos="-0.0900 0.0213 0.0348" size="0.0169"/>
+                    <geom class="collision" type="sphere" pos="0.0372 0.0011 0.0370" size="0.0225"/>
+                    <geom class="collision" type="sphere" pos="-0.0367 0.0067 0.0398" size="0.0262"/>
+                    <geom class="collision" type="sphere" pos="-0.0333 -0.0188 0.0318" size="0.0228"/>
+                    <geom class="collision" type="sphere" pos="-0.0622 -0.0141 0.0150" size="0.0151"/>
+                    <geom class="collision" type="sphere" pos="-0.0888 -0.0193 0.0324" size="0.0200"/>
+                    <geom class="collision" type="sphere" pos="0.0019 0.0303 0.0369" size="0.0281"/>
+                    <geom class="collision" type="sphere" pos="0.0106 -0.0290 0.0367" size="0.0257"/>
+                    <geom class="collision" type="sphere" pos="-0.0666 0.0105 0.0159" size="0.0212"/>
                     <!-- TCP: +z = approach axis. 0.12 m out from gripper_base,
                          toward the fingertip end of the pads (collision pads span
                          approach-z 0.059..0.136; grip centre 0.10 gripped too deep);

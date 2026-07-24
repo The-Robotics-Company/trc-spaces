@@ -28,6 +28,12 @@ from mujoco import MjSpec
 from scipy.spatial.transform import Rotation as R
 
 from molmo_spaces.configs.base_pick_and_place_configs import PickAndPlaceDataGenConfig
+from molmo_spaces.configs.camera_configs import (
+    AllCameraTypes,
+    CameraSystemConfig,
+    MjcfCameraConfig,
+    RandomizedExocentricCameraConfig,
+)
 from molmo_spaces.configs.policy_configs import PickAndPlacePlannerPolicyConfig
 from molmo_spaces.configs.task_sampler_configs import PickAndPlaceTaskSamplerConfig
 from molmo_spaces.data_generation.config.piper_x_datagen_configs import PiperXCameraSystem
@@ -125,6 +131,12 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
     # far outside the workspace and the wrist camera's view of the shelf
     _PARK_XY = ((0.9, -0.6), (0.9, -0.45), (0.9, 0.45), (0.9, 0.6))
     _PARK_Z = -0.725  # floor top is -0.74; cube half-size 0.015
+    # Camera aim point: fixed 5 cm above the upper board (top z=0.13), pulled
+    # from the board center (x=0.445) toward the arm so the framing keeps more
+    # of the arm in view. The stock workspace center (centroid of first cube +
+    # cup + gripper) moves with the episode layout; camera framing must depend
+    # on nothing but the board.
+    WORKSPACE_CENTER = (0.35, 0.0, 0.18)
 
     def __init__(self, config) -> None:
         super().__init__(config)
@@ -150,6 +162,9 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
 
     def _filter_place_target(self, env, pickup_obj_name, place_target_name) -> bool:
         return True
+
+    def get_workspace_center(self, env: CPUMujocoEnv) -> np.ndarray:
+        return np.array(self.WORKSPACE_CENTER)
 
     def _sample_cup_xy(self) -> np.ndarray:
         return self._sample_cube_xy()  # measured place-reach covers the board
@@ -896,3 +911,60 @@ class PiperXCubesInCupDataGenConfig(PickAndPlaceDataGenConfig):
     @property
     def tag(self) -> str:
         return "piper_x_cubes_in_cup_datagen"
+
+
+class PiperXBehindBoardRandomCamSystem(CameraSystemConfig):
+    """Wrist cam + one exo cam re-sampled per episode BEYOND the upper board.
+
+    The exo camera is sampled in spherical coordinates around the workspace
+    center, which PiperXCubesInCupTaskSampler pins to a FIXED point 5 cm above
+    the upper board (WORKSPACE_CENTER) — independent of the episode's
+    cube/cup layout. Azimuth is restricted to a sector around +x, so the camera
+    sits on the far side of board2 (back edge x=0.62) and looks back over the
+    shelf at the workspace center — framing both the upper board and the arm
+    behind it. Height keeps it above the board top (z=0.13). Poses where the
+    cubes/cup/gripper are not actually on screen are rejected by the
+    segmentation visibility check and re-sampled (stock
+    RandomizedExocentricCameraConfig machinery).
+    """
+
+    img_resolution: tuple[int, int] = (624, 352)
+    cameras: list[AllCameraTypes] = [
+        MjcfCameraConfig(
+            name="wrist_camera",
+            mjcf_name="wrist_camera",
+            robot_namespace="robot_0/",
+        ),
+        RandomizedExocentricCameraConfig(
+            name="exo_camera",
+            # min distance 0.5 at azimuth +/-45 deg still clears the board's
+            # back edge: 0.5*cos(45) = 0.35 > 0.62 - 0.35 (aim point to edge)
+            distance_range=(0.5, 0.9),
+            height_range=(0.15, 0.55),
+            # azimuth 0 = the +x direction from the workspace center (far side)
+            azimuth_range=(-np.pi / 4, np.pi / 4),
+            fov_range=(55.0, 80.0),
+            lookat_noise_range=(-0.05, 0.05),
+            visibility_constraints={
+                "__task_objects__": 0.0001,
+                "__gripper__": 0.0001,
+            },
+            max_placement_attempts=50,
+            allow_relaxed_constraints=True,
+        ),
+    ]
+
+
+@register_config("PiperXCubesInCupRandomCamDataGenConfig")
+class PiperXCubesInCupRandomCamDataGenConfig(PiperXCubesInCupDataGenConfig):
+    """Cubes-in-cup subversion: the exo camera is randomized per episode in the
+    region beyond the upper board, facing back at the shelf + arm."""
+
+    camera_config: PiperXBehindBoardRandomCamSystem = PiperXBehindBoardRandomCamSystem()
+    output_dir: Path = (
+        Path("experiment_output") / "datagen" / "piper_x_cubes_in_cup_randcam_v1"
+    )
+
+    @property
+    def tag(self) -> str:
+        return "piper_x_cubes_in_cup_randcam_datagen"

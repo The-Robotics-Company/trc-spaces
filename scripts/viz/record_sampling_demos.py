@@ -42,7 +42,8 @@ ALL_DEMOS = ["task_sampling", "action_noise", "camera_randomization"]
 NOISE_DEFAULT = (0.1, 0.02, 0.1)  # action_scale_factor, pos cap [m], rot cap [rad]
 NOISE_CRANKED = (1.0, 0.05, 0.3)
 NOISE_SEED = 21
-TASK_SEEDS = list(range(9))
+# 3 seeds are enough to show the spread (measured cube counts: 1 / 3 / 4)
+TASK_SEEDS = [0, 3, 5]
 CAM_SEED = 7
 CAM_N = 12
 
@@ -144,7 +145,7 @@ def demo_task_sampling() -> None:
         del task
         gc.collect()
 
-    fig, axes = plt.subplots(3, 3, figsize=(12, 7.2))
+    fig, axes = plt.subplots(1, len(tiles), figsize=(4.3 * len(tiles), 2.9))
     for ax, (s, img, nc) in zip(axes.flat, tiles):
         ax.imshow(img)
         ax.set_title(f"seed {s} · {nc} cube{'s' if nc != 1 else ''}", fontsize=9)
@@ -165,7 +166,7 @@ def demo_task_sampling() -> None:
             "cube/cup placement on the shelf, graduated robot init-pose "
             "noise. This is where most dataset variation comes from.",
             "command": "python scripts/viz/piper_x_cubes_in_cup_preview.py <seed>",
-            "metrics": f"seeds {TASK_SEEDS[0]}-{TASK_SEEDS[-1]}: cube counts {counts}",
+            "metrics": f"seeds {TASK_SEEDS}: cube counts {counts}",
             "media": [{"type": "image", "file": media}],
         },
     )

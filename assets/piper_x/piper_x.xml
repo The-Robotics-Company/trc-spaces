@@ -143,19 +143,23 @@
                       <inertial pos="0.000651232 -0.049193 0.00972259" quat="0.477798 0.572974 -0.518028 0.418398" mass="0.025" diaginertia="7.74531e-05 7.36783e-05 5.0886e-06"/>
                       <joint name="gripper_joint1" class="finger" pos="0 0 0" axis="0 0 1" type="slide" range="0 0.05"/>
                       <geom class="visual" mesh="gripper_link1" material="piper_dark"/>
-                      <!-- rubber-pad friction; condim 4 adds torsional so the cube
+                      <!-- pad friction mu=1 (was 2; measured grip test 2026-07-26:
+                           identical in-hand slip ~19 mm and task success at 1 vs 2,
+                           and randomize_dynamics homogenizes robot geoms to their
+                           average anyway). condim 4 adds torsional so the cube
                            can't spin out between the pads. priority 1 makes these
                            contact params win the pair; solref/solimp stiffened
                            (timeconst 0.005 >= 2*dt) so the 40 N squeeze doesn't
                            interpenetrate the cube and eject it -->
-                      <geom class="collision" mesh="gripper_link1" friction="2 0.05 0.002"
+
+                      <geom class="collision" mesh="gripper_link1" friction="1 0.05 0.002"
                             condim="4" priority="1" solref="0.005 1" solimp="0.95 0.99 0.001"/>
                     </body>
                     <body name="gripper_link2" gravcomp="1" pos="0 0 0.1358" quat="1.89469e-08 1.89469e-08 -0.707107 -0.707107">
                       <inertial pos="0.000651232 -0.049193 0.00972259" quat="0.477798 0.572974 -0.518028 0.418398" mass="0.025" diaginertia="7.74531e-05 7.36783e-05 5.0886e-06"/>
                       <joint name="gripper_joint2" class="finger" pos="0 0 0" axis="0 0 -1" type="slide" range="-0.05 0"/>
                       <geom class="visual" mesh="gripper_link2" material="piper_dark"/>
-                      <geom class="collision" mesh="gripper_link2" friction="2 0.05 0.002"
+                      <geom class="collision" mesh="gripper_link2" friction="1 0.05 0.002"
                             condim="4" priority="1" solref="0.005 1" solimp="0.95 0.99 0.001"/>
                     </body>
                   </body>

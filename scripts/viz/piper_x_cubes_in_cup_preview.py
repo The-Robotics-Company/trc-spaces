@@ -45,6 +45,15 @@ def main() -> int:
     for attempt in range(10):
         try:
             task = sampler.sample_task()
+            pad_mu = os.environ.get("PAD_MU")  # override fingertip pad sliding friction
+            if pad_mu is not None:
+                m = task.env.mj_model
+                pads = [g for g in range(m.ngeom)
+                        if m.geom_friction[g][0] > 1.5
+                        and m.body(m.geom(g).bodyid.item()).name.startswith("robot_")]
+                for g in pads:
+                    m.geom_friction[g][0] = float(pad_mu)
+                print(f"[preview] gripper pad sliding friction -> {pad_mu} ({len(pads)} geoms)")
             policy = exp_config.policy_config.policy_factory(exp_config, task)
             task.register_policy(policy)
             if show:

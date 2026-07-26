@@ -29,6 +29,12 @@
 
   <worldbody>
     <geom name="floor" type="plane" size="2 2 0.1" pos="0 0 -0.74" material="floor_mat"/>
+    <!-- exocentric "diag view" camera, WORLD-fixed. Hardcoded copy of the
+         base-mounted exo_camera in assets/piper_x/piper_x.xml (identical
+         numbers while the base sat at the origin): the robot base pose is
+         randomized per episode and the diag framing must not move with it. -->
+    <camera name="exo_camera" pos="1.1717 -0.31 0.5726"
+            xyaxes="0.342 0.9397 0 -0.3971 0.1445 0.9063" fovy="45"/>
     <light name="key_light" pos="0.6 -0.6 1.6" dir="-0.3 0.3 -1" directional="true" diffuse="0.8 0.8 0.8"/>
     <light name="fill_light" pos="-0.4 0.6 1.4" dir="0.3 -0.4 -1" directional="true" diffuse="0.4 0.4 0.4"/>
 

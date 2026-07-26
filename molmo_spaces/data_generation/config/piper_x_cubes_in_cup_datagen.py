@@ -7,9 +7,10 @@ poses). The scene ``asset_library/cubes_in_cup_scene.xml`` already contains the
 cup receptacle and one cube on the upper shelf (board2, top z=0.13). This module:
 
   * registers the user asset + grasp libraries at import (idempotent),
-  * defines ``PiperXCubesInCupTaskSampler`` — keeps the fixed-base arm at the
-    world origin and re-samples the cube + cup on the shelf each episode, using
-    the in-scene cup as the place receptacle (no external procthor receptacles),
+  * defines ``PiperXCubesInCupTaskSampler`` — samples the arm base around its
+    origin mount (±3 cm xyz; ±15° yaw with prob 0.5) and re-samples the cube +
+    cup on the shelf each episode, using the in-scene cup as the place
+    receptacle (no external procthor receptacles),
   * defines ``PiperXCuroboIKPickAndPlacePlannerPolicy`` — solves IK with cuRobo
     per waypoint and executes in joint space,
   * registers ``PiperXCubesInCupDataGenConfig`` for
@@ -28,6 +29,8 @@ from mujoco import MjSpec
 from scipy.spatial.transform import Rotation as R
 
 from molmo_spaces.configs.base_pick_and_place_configs import PickAndPlaceDataGenConfig
+from molmo_spaces.configs.task_configs import PickAndPlaceTaskConfig
+from molmo_spaces.tasks.pick_and_place_task import PickAndPlaceTask
 from molmo_spaces.configs.camera_configs import (
     AllCameraTypes,
     CameraSystemConfig,
@@ -59,7 +62,7 @@ from molmo_spaces.policy.solvers.object_manipulation.pick_and_place_planner_poli
 from molmo_spaces.robots.piper_x_config import PiperXRobotConfig
 from molmo_spaces.tasks.pick_and_place_task_sampler import PickAndPlaceTaskSampler
 from molmo_spaces.tasks.pick_task_sampler import PickTaskSampler
-from molmo_spaces.utils.pose import pose_mat_to_7d
+from molmo_spaces.utils.pose import pos_quat_to_pose_mat, pose_mat_to_7d
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +92,25 @@ if GRASP_LIBRARY not in USER_GRASP_LIBRARIES:
     register_user_grasp_library(_GRASP_ROOT, _ASSET_LIB, _ASSET_LIB_NAME)
 
 
+class PiperXCubesInCupCameraSystem(PiperXCameraSystem):
+    """Same wrist cam, but the exo camera is the WORLD-fixed scene-level one
+    (asset_library/cubes_in_cup_scene.xml), not the base-mounted copy inside
+    piper_x.xml — the base pose is randomized per episode and the diag view
+    must not move with it."""
+
+    cameras: list[AllCameraTypes] = [
+        MjcfCameraConfig(
+            name="wrist_camera",
+            mjcf_name="wrist_camera",
+            robot_namespace="robot_0/",
+        ),
+        MjcfCameraConfig(
+            name="exo_camera",
+            mjcf_name="exo_camera",  # scene-level, no robot namespace
+        ),
+    ]
+
+
 class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
     """Custom-scene pick-and-place sampler for the cubes-in-cup task.
 
@@ -98,8 +120,9 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
       * the cup is already in the scene, so ``add_auxiliary_objects`` skips
         ``_add_receptacles_to_scene`` and registers ``"cup"`` as the receptacle;
       * ``_prepare_place_target`` / ``_filter_place_target`` are no-ops;
-      * ``_sample_and_place_robot`` keeps the fixed-base arm at the world origin
-        and samples the cube + cup on the shelf.
+      * ``_sample_and_place_robot`` samples the arm base around its origin
+        mount (±3 cm xyz; ±15° yaw with prob 0.5) and the cube + cup on the
+        shelf.
     """
 
     RECEPTACLE_NAME = "cup"
@@ -137,9 +160,15 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
     # cup + gripper) moves with the episode layout; camera framing must depend
     # on nothing but the board.
     WORKSPACE_CENTER = (0.35, 0.0, 0.18)
+    # Base pose noise around the nominal origin mount, applied per episode by
+    # _sample_and_place_robot: uniform per-axis translation and yaw-only tilt.
+    BASE_POS_NOISE = 0.03  # ±3 cm on x/y/z
+    BASE_YAW_NOISE = np.deg2rad(15.0)  # ±15° yaw
+    BASE_YAW_PROB = 0.5  # chance the yaw noise is applied at all (else yaw = 0)
 
     def __init__(self, config) -> None:
         super().__init__(config)
+        self._base_xy = np.zeros(2)
         self._register_in_scene_cup()
 
     def _register_in_scene_cup(self) -> None:
@@ -166,6 +195,13 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
     def get_workspace_center(self, env: CPUMujocoEnv) -> np.ndarray:
         return np.array(self.WORKSPACE_CENTER)
 
+    def _sample_task(self, env: CPUMujocoEnv):
+        """Honor task_config.task_cls — the base sampler hardcodes
+        PickAndPlaceTask, which would bypass the multi-cube success judge
+        (PiperXCubesInCupTask)."""
+        self._configure_pick_and_place(env)
+        return self.config.task_config.task_cls(env, self.config)
+
     def _sample_cup_xy(self) -> np.ndarray:
         return self._sample_cube_xy()  # measured place-reach covers the board
 
@@ -173,7 +209,8 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
         while True:
             xy = np.array([np.random.uniform(*self.BOARD_X),
                            np.random.uniform(*self.BOARD_Y)])
-            if np.linalg.norm(xy) <= self.MAX_REACH_XY:
+            # reach is measured from the (noised) base, not the world origin
+            if np.linalg.norm(xy - self._base_xy) <= self.MAX_REACH_XY:
                 return xy
 
     @staticmethod
@@ -213,13 +250,23 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
         return active
 
     def _sample_and_place_robot(self, env: CPUMujocoEnv) -> None:
-        """Keep the fixed-base arm at the origin; sample 1-4 cubes + the cup on
-        the shelf (surplus cubes parked on the floor, out of the workspace)."""
+        """Sample the arm base around its nominal origin mount, then 1-4 cubes +
+        the cup on the shelf (surplus cubes parked on the floor, out of the
+        workspace)."""
         task_cfg = self.config.task_config
         robot_view = env.current_robot.robot_view
 
-        # Fixed-base tabletop arm (base_size=None => arm base at z=0). Not moved;
-        # just record the base pose.
+        # Base pose noise: uniform ±3 cm per translation axis; ±15° yaw applied
+        # with probability BASE_YAW_PROB (else the base stays square). The base
+        # is a mocap body, so this is a pure teleport; downstream IK / planning
+        # reads the live base pose (world targets are transformed into the base
+        # frame per solve), and the exo camera is scene-level, so neither
+        # depends on where the base lands.
+        offset = np.random.uniform(-self.BASE_POS_NOISE, self.BASE_POS_NOISE, size=3)
+        yaw = (np.random.uniform(-self.BASE_YAW_NOISE, self.BASE_YAW_NOISE)
+               if np.random.random() < self.BASE_YAW_PROB else 0.0)
+        robot_view.base.pose = self._pose(*offset, yaw=yaw)
+        self._base_xy = offset[:2]  # cube/cup reach is measured from here
         task_cfg.robot_base_pose = pose_mat_to_7d(robot_view.base.pose).tolist()
 
         n_cubes = int(np.random.randint(1, len(self.CUBE_NAMES) + 1))
@@ -244,6 +291,51 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
         goal_pose[2] += 0.05
         task_cfg.pickup_obj_goal_pose = goal_pose.tolist()
         task_cfg.place_receptacle_start_pose = pose_mat_to_7d(cup.pose).tolist()
+
+
+class PiperXCubesInCupTask(PickAndPlaceTask):
+    """PickAndPlaceTask with a multi-cube success criterion.
+
+    The stock judge only checks the CURRENT ``pickup_obj_name`` and calls a
+    cube "unsupported" when it rests on other cubes instead of the cup body,
+    so every multi-cube episode was recorded as a failure the moment the
+    chained policy retargeted to the next cube (measured on the 2026-07-26
+    run: success flipped True->False exactly at retarget and never recovered).
+    Here success = EVERY cube that started on the shelf is in the cup —
+    within 7 cm of the cup axis at shelf height or above — the same
+    criterion the policy (``_all_cubes_in_cup``) and the preview script use.
+    """
+
+    _IN_CUP_XY = 0.07  # keep in sync with _next_shelf_cube/_all_cubes_in_cup
+    _SHELF_Z = 0.13
+
+    _episode_cubes: list[str] | None = None
+
+    def _shelf_cubes(self, om) -> list[str]:
+        # captured lazily on first use: cubes sit at z=0.144 from sampling until
+        # first grasped, so any call in the first steps sees the episode layout
+        if self._episode_cubes is None:
+            self._episode_cubes = [
+                n for n in PiperXCubesInCupTaskSampler.CUBE_NAMES
+                if (o := om.get_object_by_name(n)) is not None
+                and 0.135 < o.position[2] < 0.20
+            ]
+        return self._episode_cubes
+
+    def get_info(self):
+        infos = super().get_info()
+        om = self._env.object_managers[self._env.current_batch_index]
+        cup = om.get_object_by_name(self.config.task_config.place_receptacle_name)
+        cup_xy = np.asarray(cup.position[:2])
+        all_in = True
+        for name in self._shelf_cubes(om):
+            p = np.asarray(om.get_object_by_name(name).position)
+            if np.linalg.norm(p[:2] - cup_xy) > self._IN_CUP_XY or p[2] < self._SHELF_Z:
+                all_in = False
+                break
+        for info in infos:
+            info["success"] = all_in
+        return infos
 
 
 class _PlaceCorrectingSequence(JointMoveSequence):
@@ -460,10 +552,10 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
         stay enabled for EVERY IK solve and motion plan, place phase included.
 
         Built from the live AABB (object.pose is the base-frame origin, half a
-        cup-height too low for a volume-centered cuboid). Poses go to cuRobo in
-        the robot base frame; the PiPER-X base sits at the world origin in this
-        task (base_size=None), so world poses pass through unchanged. Revisit if
-        the robot base ever moves.
+        cup-height too low for a volume-centered cuboid). Cuboids are built in
+        WORLD coordinates and transformed into the robot base frame at the end
+        — cuRobo interprets obstacle poses base-relative, and the base pose is
+        randomized per episode.
         """
         from curobo.geom.types import Cuboid, WorldConfig
 
@@ -517,8 +609,12 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
                                   pose=[*np.asarray(c).tolist(), 1.0, 0.0, 0.0, 0.0],
                                   dims=np.asarray(s).tolist()))
 
+        # stash the WORLD-frame poses for viz before the base-frame rewrite
+        self._cup_obstacle_cuboids = [(c.pose, c.dims) for c in cuboids]
+        base_inv = np.linalg.inv(self.robot_view.base.pose)
+        for c in cuboids:
+            c.pose = pose_mat_to_7d(base_inv @ pos_quat_to_pose_mat(c.pose)).tolist()
         self._get_planner().motion_gen.update_world(WorldConfig(cuboid=cuboids))
-        self._cup_obstacle_cuboids = [(c.pose, c.dims) for c in cuboids]  # for viz
         return [c.name for c in cuboids]
 
     # Nominal in-hand offset: cube ~0.03 m along tool +z beyond the TCP/grasp_site.
@@ -650,7 +746,8 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
 
         # Level frame: tool +z (approach) horizontal base->cup; tool +y (finger
         # axis) horizontal & perpendicular so opening drops the cube; +x completes.
-        a = np.array([cup_xy[0], cup_xy[1], 0.0])
+        base_xy = self.robot_view.base.pose[:2, 3]
+        a = np.array([cup_xy[0] - base_xy[0], cup_xy[1] - base_xy[1], 0.0])
         a = a / (np.linalg.norm(a) + 1e-9)
         y = np.cross(np.array([0.0, 0.0, 1.0]), a)
         y = y / (np.linalg.norm(y) + 1e-9)
@@ -871,9 +968,14 @@ class PiperXCubesInCupDataGenConfig(PickAndPlaceDataGenConfig):
     # home only after full success); budget 4 cubes + retry slack
     task_horizon: int | None = 1400
 
+    # multi-cube success judge (ALL shelf cubes in the cup) — the stock
+    # single-target PickAndPlaceTask judge marks every multi-cube episode
+    # failed once the policy retargets. See PiperXCubesInCupTask.
+    task_config: PickAndPlaceTaskConfig = PickAndPlaceTaskConfig(task_cls=PiperXCubesInCupTask)
+
     # Fixed-base tabletop: no 0.7 m pedestal (arm base at z=0, matching board1 top).
     robot_config: PiperXRobotConfig = PiperXRobotConfig(base_size=None)
-    camera_config: PiperXCameraSystem = PiperXCameraSystem()
+    camera_config: PiperXCubesInCupCameraSystem = PiperXCubesInCupCameraSystem()
 
     task_sampler_config: PickAndPlaceTaskSamplerConfig = PickAndPlaceTaskSamplerConfig(
         task_sampler_class=PiperXCubesInCupTaskSampler,

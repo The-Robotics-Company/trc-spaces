@@ -64,8 +64,15 @@
       <inertial pos="-0.00473641 2.56829e-05 0.0414515" quat="0.70428 0.034288 0.0339756 0.708279" mass="1.02" diaginertia="0.00282612 0.00269117 0.000879394"/>
       <geom class="visual" mesh="base_link" material="piper_dark"/>
       <geom class="collision" mesh="base_link"/>
-      <!-- exocentric camera on the fixed base, auto-aimed at the mid-arm -->
-      <camera name="exo_camera" pos="-0.35 0.35 0.55" mode="targetbody" target="link3" fovy="58"/>
+      <!-- exocentric camera: the demo "diag view" (free cam az 160, el -25,
+           dist 1.0, lookat 0.32 0 0.15) baked as a fixed camera — front-right
+           of the shelf, arm + cubes + cup all in frame. Replaces the original
+           base-mounted link3-tracking cam that mostly saw floor and boards.
+           NOTE: base-mounted, so it moves with the base. The cubes-in-cup task
+           (randomized base pose) uses a world-fixed copy in
+           asset_library/cubes_in_cup_scene.xml instead. -->
+      <camera name="exo_camera" pos="1.1717 -0.31 0.5726"
+              xyaxes="0.342 0.9397 0 -0.3971 0.1445 0.9063" fovy="45"/>
       <body name="link1" gravcomp="1" pos="0 0 0.123" quat="2.67949e-08 0 0 1">
         <inertial pos="0.00053 -0.00039 -0.00315" quat="0.737007 0.671914 -0.0484837 0.0547877" mass="0.71" diaginertia="0.0005012 0.00045752 0.00040836"/>
         <joint name="joint1" pos="0 0 0" axis="0 0 1" range="-2.61799 2.61799"/>

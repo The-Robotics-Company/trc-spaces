@@ -5,7 +5,12 @@
          board2 (shelf)  35x70 cm, top z=0.13   center (0.445, 0, 0.1225), x 0.27..0.62
        Cubes and cup both sit ON the upper shelf (board2). Cube+cup are re-sampled
        per episode by the task sampler; the poses here are nominal spawns. -->
-  <option integrator="implicit" timestep="0.002"/>
+  <!-- cone=elliptic + impratio=10: the MuJoCo-documented grasping setup.
+       At the default (pyramidal, impratio 1) friction constraints are as soft
+       as normal ones, so held cubes creep ~17 mm through the pads per carry;
+       measured 2026-07-26 (piper_x_grip_slip_probe.py): this cuts it to 1-7 mm
+       with zero torsional spin either way. -->
+  <option integrator="implicit" timestep="0.002" cone="elliptic" impratio="10"/>
 
   <!-- Anchor the scene scale explicitly (Menagerie convention): the auto-computed
        extent (~11 m, dominated by the floor plane) makes znear = 0.01*extent ≈ 11 cm,
@@ -38,10 +43,22 @@
     <light name="key_light" pos="0.6 -0.6 1.6" dir="-0.3 0.3 -1" directional="true" diffuse="0.8 0.8 0.8"/>
     <light name="fill_light" pos="-0.4 0.6 1.4" dir="0.3 -0.4 -1" directional="true" diffuse="0.4 0.4 0.4"/>
 
+    <!-- Boards are split into a COLLISION geom (physics, invisible) and a
+         VISUAL geom (contype==0, carries the material). TextureRandomizer only
+         touches visual geoms, so this split is what lets it randomize the board
+         surface (rgba/specular/shininess/reflectance). The material + reflectance
+         live ONLY on the visual geom, so board2_visual stays the single reflective
+         geom the classic renderer mirrors. The visual top sits +0.2 mm proud of the
+         collision top to avoid coplanar z-fighting (imperceptible, well under the
+         ~1 mm cube seating tolerance). -->
     <!-- board 1: main table, top surface at z=0 (arm mounted at its near edge) -->
-    <geom name="board1" type="box" pos="0.14 0 -0.0075" size="0.20 0.35 0.0075" material="board_mat"/>
+    <geom name="board1" type="box" pos="0.14 0 -0.0075" size="0.20 0.35 0.0075" rgba="0 0 0 0" group="3"/>
+    <geom name="board1_visual" type="box" pos="0.14 0 -0.0073" size="0.20 0.35 0.0075"
+          material="board_mat" contype="0" conaffinity="0"/>
     <!-- board 2: upper shelf, top surface at z=0.13, cantilevered behind -->
-    <geom name="board2" type="box" pos="0.445 0 0.1225" size="0.175 0.35 0.0075" material="board2_mat"/>
+    <geom name="board2" type="box" pos="0.445 0 0.1225" size="0.175 0.35 0.0075" rgba="0 0 0 0" group="3"/>
+    <geom name="board2_visual" type="box" pos="0.445 0 0.1227" size="0.175 0.35 0.0075"
+          material="board2_mat" contype="0" conaffinity="0"/>
 
     <!-- cubes on the shelf (nominal; re-sampled per episode: 1-4 active, extras
          parked on the floor by the task sampler). Seated ~1mm into the shelf

@@ -36,7 +36,17 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 OUT = REPO / "results" / "sampling_demos"
-ALL_DEMOS = ["task_sampling", "action_noise", "camera_randomization"]
+ALL_DEMOS = [
+    "task_sampling",
+    "action_noise",
+    "camera_randomization",
+    "lighting_randomization",
+    "texture_randomization",
+    "dynamics_randomization",
+    "init_pose_noise",
+    "base_pose_noise",
+    "offline_rerender",
+]
 
 # knobs shared with scripts/viz/piper_x_action_noise_demo.py
 NOISE_DEFAULT = (0.1, 0.02, 0.1)  # action_scale_factor, pos cap [m], rot cap [rad]
@@ -46,6 +56,11 @@ NOISE_SEED = 21
 TASK_SEEDS = [0, 3, 5]
 CAM_SEED = 7
 CAM_N = 12
+# opt-in DR demos (lighting / texture / dynamics): seed 5 = 4 cubes + cup —
+# the busiest layout, so the visual change has the most surfaces to show on
+DR_SEED = 5
+DR_TILES = 8  # authored baseline + 7 re-rolls
+DYN_ROUNDS = 200
 
 
 def _fragment(name: str) -> Path:
@@ -163,8 +178,9 @@ def demo_task_sampling() -> None:
             "group": "task sampling",
             "title": "Task sampling — cube count & placement",
             "desc": "Fresh initial layout per seed: cube count (1-4), measured "
-            "cube/cup placement on the shelf, graduated robot init-pose "
-            "noise. This is where most dataset variation comes from.",
+            "cube/cup placement on the shelf. This is where most dataset "
+            "variation comes from. (No robot init-pose noise: inert for "
+            "PiPER-X — see the init_pose_noise demo.)",
             "command": "python scripts/viz/piper_x_cubes_in_cup_preview.py <seed>",
             "metrics": f"seeds {TASK_SEEDS}: cube counts {counts}",
             "media": [{"type": "image", "file": media}],
@@ -357,21 +373,748 @@ def demo_camera_randomization() -> None:
     )
 
 
-# Axes that exist in molmo_spaces but are OFF for PiPER-X cubes-in-cup — shown
-# as a muted note card so the section reflects the full DR map, not just what
-# is active (see docs/dr_and_task_sampling_map.md).
-INACTIVE_NOTE = {
-    "id": "inactive_axes",
-    "group": "off by default",
-    "title": "Inactive DR axes (PiPER-X cubes-in-cup)",
-    "desc": "randomize_lighting · randomize_textures (+ BRDF jitter) · "
-    "randomize_dynamics (mass/friction/inertia ±20%) · robot speckle "
-    "textures (Franka-only, silently ignored for PiPER-X) · door joint DR. "
-    "All default off and unset in PiperXCubesInCupDataGenConfig — episodes "
-    "vary only through task sampling, camera noise and action noise.",
-    "command": "docs/dr_and_task_sampling_map.md",
-    "media": [],
-}
+def _make_dr_task(seed: int, *, lighting=False, textures=False, dynamics=False):
+    """Task with the opt-in DR flags set EXPLICITLY (config class attrs are
+    shared in-process, so every flag is written every time, True or False).
+    Same seed => same episode layout: the flags only add independent
+    RandomState streams (task_sampler.init_scene), they don't touch the
+    global np.random stream the layout sampling draws from."""
+    from molmo_spaces.data_generation.config.piper_x_cubes_in_cup_datagen import (
+        PiperXCubesInCupDataGenConfig,
+    )
+
+    cfg = PiperXCubesInCupDataGenConfig()
+    _set_noise(cfg, NOISE_DEFAULT)
+    ts = cfg.task_sampler_config
+    ts.randomize_lighting = lighting
+    ts.randomize_textures = textures  # also bakes the empty-material pool at compile
+    ts.randomize_textures_all = textures  # full randomize(): the custom scene has no THOR categories
+    ts.randomize_dynamics = dynamics
+    return _make_task(cfg, seed)
+
+
+def _tile_grid(tiles, suptitle: str, path: Path) -> None:
+    """Save a 4-wide grid of (label, img) tiles."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    cols = 4
+    rows = (len(tiles) + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(4.3 * cols, 2.9 * rows))
+    axes = np.ravel(axes)
+    for ax, (label, img) in zip(axes, tiles):
+        ax.imshow(img)
+        ax.set_title(label, fontsize=8)
+    for ax in axes:
+        ax.axis("off")
+    fig.suptitle(suptitle, fontsize=12)
+    fig.tight_layout()
+    fig.savefig(path, dpi=110)
+
+
+def demo_lighting_randomization() -> None:
+    """One fixed episode layout (seed 5), lighting re-rolled per tile — exactly
+    the per-episode LightingRandomizer.randomize() path from task_sampler
+    randomize_scene(), with measured per-roll light state in the tile labels."""
+    import mujoco
+    import numpy as np
+
+    sampler, task = _make_dr_task(DR_SEED, lighting=True)
+    rnd = sampler.lighting_randomizer
+    renderer, cam, mj_data = _diag_renderer(task.env)
+    model = rnd.model
+
+    def roll_stats():
+        on = [i for i in rnd.light_ids if model.light_active[i] > 0]
+        diffuse = float(np.mean([model.light_diffuse[i].mean() for i in on])) if on else 0.0
+        tilt = 0.0
+        for i in rnd.light_ids:
+            d0 = rnd._defaults[i]["dir"] / np.linalg.norm(rnd._defaults[i]["dir"])
+            d1 = model.light_dir[i] / (np.linalg.norm(model.light_dir[i]) + 1e-9)
+            tilt = max(tilt, float(np.degrees(np.arccos(np.clip(d0 @ d1, -1.0, 1.0)))))
+        return len(on), diffuse, tilt
+
+    tiles = []
+    stats = []
+    for k in range(DR_TILES):
+        if k == 0:
+            rnd.restore_defaults()  # sample_task already rolled once — show authored first
+            mujoco.mj_forward(model, mj_data)
+        else:
+            rnd.randomize(mj_data)
+        renderer.update_scene(mj_data, camera=cam)
+        img = renderer.render()
+        n_on, diffuse, tilt = roll_stats()
+        label = (
+            f"authored · {n_on}/{len(rnd.light_ids)} on · diffuse {diffuse:.2f}"
+            if k == 0
+            else f"roll {k} · {n_on}/{len(rnd.light_ids)} on · diffuse {diffuse:.2f} · tilt {tilt:.0f}\N{DEGREE SIGN}"
+        )
+        tiles.append((label, img))
+        if k > 0:
+            stats.append((n_on, diffuse, tilt))
+        print(f"[lighting_randomization] {label}")
+    renderer.close()
+
+    media = "lighting_randomization_grid.png"
+    _tile_grid(tiles, "Lighting randomization — same layout, lighting re-rolled per episode", OUT / media)
+
+    n_on = [s[0] for s in stats]
+    diffuse = [s[1] for s in stats]
+    tilt = [s[2] for s in stats]
+    _write_fragment(
+        "lighting_randomization",
+        {
+            "id": "lighting_randomization",
+            "group": "opt-in DR",
+            "title": "Lighting randomization (randomize_lighting)",
+            "desc": "Per-episode perturbation of every light around its authored "
+            "value: position ±0.5 m, direction ±1 rad, "
+            "ambient/diffuse/specular ±0.1, random on/off (at least one "
+            "light is forced back on). Same seed-5 layout in every tile; only "
+            "the lighting is re-rolled. Off by default for PiPER-X "
+            "cubes-in-cup — flipped on here.",
+            "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py lighting_randomization",
+            "metrics": f"{len(rnd.light_ids)} lights · {len(stats)} rolls: "
+            f"{min(n_on)}-{max(n_on)} lights on · "
+            f"diffuse mean {min(diffuse):.2f}-{max(diffuse):.2f} · "
+            f"max direction tilt {max(tilt):.0f}\N{DEGREE SIGN} (cap 57\N{DEGREE SIGN})",
+            "media": [{"type": "image", "file": media}],
+        },
+    )
+
+
+def demo_texture_randomization() -> None:
+    """Authored baseline, one STOCK texture roll, then rolls with the visual-only
+    filter relaxed — all on the same seed-5 layout.
+
+    MEASURED FINDING the demo exists to show: the stock TextureRandomizer only
+    touches NAMED geoms with contype==0 (visual-only), and in this custom scene
+    that is exactly one geom (cup_visual) — the floor/boards/cubes are collision
+    geoms — so even with randomize_textures_all flipped on, per-episode texture
+    DR amounts to a +/-0.2 tint jitter on the cup. The relaxed rolls subclass
+    the randomizer to admit every named geom, purely to show what the mechanism
+    (rgba +/-0.2, specular/shininess +/-0.1, swaps from the model texture pool)
+    would do if the scene's geoms were eligible.
+
+    The baseline comes from a separate no-flag task: sample_task already rolls
+    textures once. A fresh mujoco.Renderer per tile is required — texture
+    bitmaps upload to the GL context at renderer creation only."""
+    import gc as _gc
+
+    import mujoco
+    import numpy as np
+
+    from molmo_spaces.env.arena.randomization.texture import TextureRandomizer
+
+    _, task0 = _make_dr_task(DR_SEED)  # all flags off -> authored look
+    renderer, cam, mj_data = _diag_renderer(task0.env)
+    renderer.update_scene(mj_data, camera=cam)
+    tiles = [("authored", renderer.render())]
+    renderer.close()
+    del task0
+    _gc.collect()
+
+    sampler, task = _make_dr_task(DR_SEED, textures=True)
+    rnd = sampler.texture_randomizer
+    model = rnd.model
+    env = task.env
+    mj_data = env.mj_datas[env.current_batch_index]
+
+    # undo the roll sample_task already applied (stock path => cup tint only),
+    # so the relaxed randomizer below saves AUTHORED values as its defaults
+    for gid, d in rnd._geom_id_to_defaults.items():
+        model.geom_rgba[gid] = d["geom_rgba"]
+
+    class _AllNamedGeomsTextureRandomizer(TextureRandomizer):
+        """Demo-only: relax the stock visual-only (contype==0) geom filter."""
+
+        def _build_name_to_geom_id(self):
+            out = {}
+            for i in range(self.model.ngeom):
+                n = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, i)
+                if n:
+                    out[n] = i
+            return out
+
+        def save_defaults(self):
+            self._defaults = {}
+            self._geom_id_to_defaults = {}
+            for name, gid in self._build_name_to_geom_id().items():
+                if name not in self.geom_names:
+                    continue
+                d = {"geom_rgba": np.array(self.model.geom_rgba[gid])}
+                mat_id = int(self.model.geom_matid[gid])
+                if mat_id >= 0:
+                    d["mat_rgba"] = np.array(self.model.mat_rgba[mat_id])
+                    d["mat_specular"] = float(self.model.mat_specular[mat_id])
+                    d["mat_shininess"] = float(self.model.mat_shininess[mat_id])
+                    d["mat_id"] = mat_id
+                    d["texture_id"] = (
+                        self._get_texture_id_for_geom(gid) if self.randomize_texture else -1
+                    )
+                else:
+                    d.update(mat_rgba=None, mat_specular=None, mat_shininess=None,
+                             mat_id=-1, texture_id=-1)
+                self._defaults[name] = d
+                self._geom_id_to_defaults[gid] = d
+
+    all_named = [
+        n for i in range(model.ngeom)
+        if (n := mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i))
+    ]
+    rnd_all = _AllNamedGeomsTextureRandomizer(
+        model=model,
+        random_state=np.random.RandomState(DR_SEED + 1),  # texture stream seed, as init_scene does
+        geom_names=all_named,
+        scene_metadata=env.current_scene_metadata,
+        rgba_perturbation_size=0.2,
+    )
+
+    def roll_stats(r):
+        rgba_changed = mat_swapped = 0
+        for gid, d in r._geom_id_to_defaults.items():
+            if not np.allclose(model.geom_rgba[gid], d["geom_rgba"], atol=1e-6):
+                rgba_changed += 1
+            if int(model.geom_matid[gid]) != d["mat_id"]:
+                mat_swapped += 1
+        return rgba_changed, mat_swapped
+
+    def snap():
+        renderer, cam, _ = _diag_renderer(env)  # fresh renderer: re-upload textures
+        renderer.update_scene(mj_data, camera=cam)
+        img = renderer.render()
+        renderer.close()
+        return img
+
+    rnd.randomize(mj_data)  # one stock roll
+    n_stock, _ = roll_stats(rnd)
+    tiles.append((f"stock filter · {n_stock}/{len(all_named)} named geoms eligible (cup tint)", snap()))
+    print(f"[texture_randomization] {tiles[-1][0]}")
+
+    # back to authored, then relaxed-filter rolls
+    for gid, d in rnd._geom_id_to_defaults.items():
+        model.geom_rgba[gid] = d["geom_rgba"]
+
+    stats = []
+    for k in range(1, DR_TILES - 1):
+        rnd_all.randomize(mj_data)
+        rgba_changed, mat_swapped = roll_stats(rnd_all)
+        stats.append((rgba_changed, mat_swapped))
+        tiles.append((f"relaxed roll {k} · {rgba_changed} rgba jittered · {mat_swapped} mat swaps", snap()))
+        print(f"[texture_randomization] {tiles[-1][0]}")
+
+    media = "texture_randomization_grid.png"
+    _tile_grid(
+        tiles,
+        "Texture randomization — stock path is cup-tint-only in this scene; relaxed filter shows the mechanism",
+        OUT / media,
+    )
+
+    rgba = [s[0] for s in stats]
+    swaps = [s[1] for s in stats]
+    _write_fragment(
+        "texture_randomization",
+        {
+            "id": "texture_randomization",
+            "group": "opt-in DR",
+            "title": "Texture & material randomization (randomize_textures_all)",
+            "desc": "MEASURED: even flipped on, the stock path touches 1 of "
+            f"{len(all_named)} named geoms in this scene (cup_visual) — the "
+            "randomizer only admits named visual-only (contype==0) geoms, and "
+            "the floor/boards/cubes are collision geoms. The 'relaxed' tiles "
+            "subclass the randomizer to admit every named geom, showing the "
+            "actual mechanism: RGBA ±0.2 around authored values, "
+            "specular/shininess ±0.1, texture swaps from the model's own "
+            "pool. Same seed-5 layout in every tile. Off by default for "
+            "PiPER-X cubes-in-cup.",
+            "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py texture_randomization",
+            "metrics": f"stock: {n_stock}/{len(all_named)} named geoms eligible · "
+            f"relaxed ({len(stats)} rolls): {min(rgba)}-{max(rgba)} geoms "
+            f"rgba-jittered, {min(swaps)}-{max(swaps)} material swaps per roll · "
+            f"pool {len(rnd_all.texture_ids) or len(rnd_all.texture_bitmaps)} model textures",
+            "media": [{"type": "image", "file": media}],
+        },
+    )
+
+
+def demo_dynamics_randomization() -> None:
+    """What DynamicsRandomizer actually does to the NAMED bodies, in real units:
+    authored value (diamond) vs the values sampled across DYN_ROUNDS episode
+    re-rolls (bar + dots). Every body with a joint is re-rolled — cubes, cup,
+    all robot links (no exclusion), plus the planner's invisible grasp-helper
+    bodies. Friction homogenization is the headline: every geom of an object
+    gets the OBJECT-AVERAGE authored sliding friction ±20%, which strips the
+    gripper pads' extra grip (authored 2.0 vs 1.0 elsewhere) every episode."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    from molmo_spaces.env.arena.arena_utils import (
+        get_all_bodies_with_joints_as_mlspaces_objects,
+    )
+
+    sampler, task = _make_dr_task(DR_SEED, dynamics=True)
+    rnd = sampler.dynamics_randomizer
+    env = task.env
+    mj_data = env.mj_datas[env.current_batch_index]
+    model = env.mj_model
+
+    objects = get_all_bodies_with_joints_as_mlspaces_objects(model, mj_data)
+    n_helpers = sum(o.name.startswith("grasp") for o in objects)
+    robot_links = [o.name for o in objects if o.name.startswith("robot_")]
+    print(f"[dynamics_randomization] {len(objects)} bodies with joints: "
+          f"{len(robot_links)} robot links, {n_helpers} grasp helpers, "
+          f"{len(objects) - len(robot_links) - n_helpers} task objects")
+
+    # authored values, saved into rnd._defaults before the very first roll
+    auth_mass: dict[int, float] = {}
+    auth_fric: dict[int, float] = {}
+    for obj in objects:
+        d = rnd._defaults[obj.object_id]
+        auth_mass.update({b: m for b, m in d["body_masses"].items() if m > 0})
+        auth_fric.update({g: float(f[0]) for g, f in d["geom_frictions"].items() if f[0] > 0})
+
+    def _bid(name):
+        return model.body(name).id
+
+    mass_rows = [  # (label, body id) — smallest to heaviest, real grams
+        ("robot link6", _bid("robot_0/link6")),
+        ("cube", _bid("cube")),
+        ("gripper finger", _bid("robot_0/gripper_link1")),
+        ("cup", _bid("cup")),
+        ("robot link2 (heaviest)", _bid("robot_0/link2")),
+    ]
+    def _gbody(g):
+        return model.body(model.geom(g).bodyid.item()).name
+
+    cube_gid = next(g for g in auth_fric if model.geom(g).bodyid.item() == _bid("cube"))
+    cup_gid = next(g for g in auth_fric if model.geom(g).bodyid.item() == _bid("cup"))
+    pad_gids = [g for g in auth_fric
+                if _gbody(g).startswith("robot_0/gripper_link") and model.geom_contype[g] != 0]
+    link_gid = next(g for g in auth_fric
+                    if _gbody(g).startswith("robot_")
+                    and not _gbody(g).startswith("robot_0/gripper_link"))
+    fric_rows = [  # (label, geom id)
+        ("cube", cube_gid),
+        ("cup", cup_gid),
+        ("robot link", link_gid),
+        ("gripper fingertip pad", pad_gids[0]),
+    ]
+
+    mass_s = {label: [] for label, _ in mass_rows}
+    fric_s = {label: [] for label, _ in fric_rows}
+    mass_r, fric_r, inert_r = [], [], []
+    for _ in range(DYN_ROUNDS):
+        rnd.randomize_objects(objects)
+        for label, b in mass_rows:
+            mass_s[label].append(float(model.body_mass[b]) * 1000.0)  # grams
+        for label, g in fric_rows:
+            fric_s[label].append(float(model.geom_friction[g][0]))
+        for obj in objects:  # pooled ratios for the metrics line
+            d = rnd._defaults[obj.object_id]
+            for b, m0 in d["body_masses"].items():
+                if m0 > 0:
+                    mass_r.append(float(model.body_mass[b]) / m0)
+            for g, f0 in d["geom_frictions"].items():
+                if f0[0] > 0:
+                    fric_r.append(float(model.geom_friction[g][0]) / float(f0[0]))
+            for b, i0 in d["body_inertias"].items():
+                if np.all(np.asarray(i0) > 0):
+                    inert_r.append(float(model.body_inertia[b][0]) / float(i0[0]))
+    mass_r, fric_r, inert_r = map(np.asarray, (mass_r, fric_r, inert_r))
+
+    # chart: per-body ranges in real units — authored diamond vs sampled bar
+    ink, ink2, hue, surface, grid = "#0b0b0b", "#52514e", "#2a78d6", "#fcfcfb", "#e4e3df"
+
+    def _fmt(v):
+        return f"{v:.0f}" if v >= 100 else (f"{v:.1f}" if v >= 10 else f"{v:.2f}")
+
+    def _range_panel(ax, rows, samples, authored, unit):
+        for y, (label, key) in enumerate(rows):
+            s = np.asarray(samples[label])
+            ax.scatter(s, np.full_like(s, y), s=8, color=hue, alpha=0.12, linewidths=0)
+            ax.plot([s.min(), s.max()], [y, y], color=hue, lw=5,
+                    solid_capstyle="round", zorder=3)
+            ax.plot([authored[key]], [y], marker="D", ms=7, color=ink, zorder=4)
+            ax.annotate(f"[{_fmt(s.min())}, {_fmt(s.max())}]", (s.max(), y),
+                        xytext=(8, -3), textcoords="offset points",
+                        fontsize=8, color=ink2)
+        ax.set_yticks(range(len(rows)), [r[0] for r in rows], fontsize=9, color=ink)
+        ax.set_ylim(-0.6, len(rows) - 0.4)
+        ax.set_xlabel(unit, fontsize=9, color=ink2)
+        ax.set_facecolor(surface)
+        ax.tick_params(colors=ink2, labelsize=8)
+        ax.grid(axis="x", color=grid, linewidth=0.8)
+        ax.set_axisbelow(True)
+        for side in ("top", "right", "left"):
+            ax.spines[side].set_visible(False)
+        ax.spines["bottom"].set_color(ink2)
+
+    fig, (axm, axf) = plt.subplots(1, 2, figsize=(12.9, 4.1), facecolor=surface)
+    _range_panel(axm, mass_rows, mass_s, {b: auth_mass[b] * 1000.0 for _, b in mass_rows},
+                 "mass [g] — one ±20% factor per body, log scale")
+    axm.set_xscale("log")
+    axm.set_title("mass", fontsize=11, color=ink)
+    _range_panel(axf, fric_rows, fric_s, {g: auth_fric[g] for _, g in fric_rows},
+                 "sliding friction μ — object-average authored value ±20%")
+    axf.set_xlim(0, 2.4)
+    axf.set_title("sliding friction", fontsize=11, color=ink)
+    axf.set_ylim(-1.45, len(fric_rows) - 0.4)  # room for the pad note below the rows
+    axf.text(
+        0.0, -1.3,
+        "every episode re-rolls ALL robot geoms to the robot-wide average ±20%.\n"
+        "The fingertip pads used to be authored extra-grippy (μ=2.0) and lost\n"
+        "~half their grip here — re-authored to μ=1.0 on 2026-07-26 (grip test: no slip difference)",
+        fontsize=8.5, color=ink2, va="bottom",
+    )
+    handles = [
+        plt.Line2D([], [], color=hue, lw=5, solid_capstyle="round",
+                   label=f"sampled over {DYN_ROUNDS} episodes (min–max + dots)"),
+        plt.Line2D([], [], color=ink, marker="D", ms=7, lw=0, label="authored value"),
+    ]
+    fig.legend(handles=handles, loc="lower center", ncols=2, frameon=False,
+               fontsize=9, labelcolor=ink2)
+    fig.suptitle("Dynamics randomization — what each episode actually re-rolls",
+                 fontsize=12, color=ink)
+    fig.text(0.5, 0.895,
+             f"inertia: same ±20%, per body and axis (measured [{inert_r.min():.3f}, "
+             f"{inert_r.max():.3f}]) · also re-rolled: {n_helpers} invisible "
+             "grasp-planner helper bodies · robot links included, no exclusion",
+             ha="center", fontsize=9, color=ink2)
+    fig.tight_layout(rect=(0, 0.06, 1, 0.90))
+    media = "dynamics_randomization_ranges.png"
+    fig.savefig(OUT / media, dpi=110, facecolor=surface)
+
+    pads = np.asarray(fric_s["gripper fingertip pad"])
+    _write_fragment(
+        "dynamics_randomization",
+        {
+            "id": "dynamics_randomization",
+            "group": "opt-in DR",
+            "title": "Dynamics randomization (randomize_dynamics)",
+            "desc": "Each episode re-rolls physics before the robot moves, for "
+            "every body with a joint — cubes, cup, all 8 robot links, and "
+            f"{n_helpers} invisible grasp-planner helper bodies. Mass: one "
+            "±20% factor per body. Inertia: ±20% per body per axis. Friction: "
+            "every geom of an object is set to the object's AVERAGE authored "
+            "sliding friction ±20% — this used to quietly strip the fingertip "
+            "pads of their extra grip (authored μ=2.0 vs 1.0 elsewhere), so "
+            "the pads were re-authored to μ=1.0 on 2026-07-26 after a grip "
+            "test showed no slip difference (2/2 cubes in cup either way). The "
+            "chart shows authored value vs the range actually sampled. Off by "
+            "default for PiPER-X cubes-in-cup — flipped on here.",
+            "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py dynamics_randomization",
+            "metrics": f"{DYN_ROUNDS} rolls · 4 cubes + cup + 8 robot links + "
+            f"{n_helpers} helpers · pooled ratio ranges: mass "
+            f"[{mass_r.min():.3f}, {mass_r.max():.3f}] · inertia "
+            f"[{inert_r.min():.3f}, {inert_r.max():.3f}] · friction "
+            f"[{fric_r.min():.3f}, {fric_r.max():.3f}] (gripper pads: "
+            f"authored {auth_fric[pad_gids[0]]:.1f} → sampled "
+            f"[{pads.min():.2f}, {pads.max():.2f}])",
+            "media": [{"type": "image", "file": media}],
+        },
+    )
+
+
+def demo_init_pose_noise() -> None:
+    """Robot init-pose noise: the map doc lists it [ON], but PiPER-X ships with
+    init_qpos_noise_range=None so it never fires here (MEASURED: every recorded
+    episode starts at exactly the home qpos). This demo derives a graduated
+    6-joint range with the documented Franka recipe — dq = w*0.1/||J_p @ w||,
+    w = [1..6], so distal joints move more and the TCP stays within ~10 cm —
+    then shows draws around home plus the measured TCP spread."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import mujoco
+    import numpy as np
+
+    from molmo_spaces.utils.pose import pose_mat_to_7d
+
+    cfg_sampler, task = _make_dr_task(DR_SEED)
+    env = task.env
+    robot = env.robots[0]
+    rv = robot.robot_view
+    arm_mg_id = robot.get_arm_move_group_ids()[0]
+    arm_mg = rv.get_move_group(arm_mg_id)
+    grip_mg = rv.get_gripper_movegroup_ids()[0]
+    model, data = env.current_model, env.current_data
+
+    from molmo_spaces.data_generation.config.piper_x_cubes_in_cup_datagen import (
+        PiperXCubesInCupDataGenConfig,
+    )
+
+    stock_range = PiperXCubesInCupDataGenConfig().robot_config.init_qpos_noise_range
+    home = np.array(task.config.robot_config.init_qpos["arm"])
+
+    def tcp_pos() -> np.ndarray:
+        return pose_mat_to_7d(rv.get_move_group(grip_mg).leaf_frame_to_robot)[:3]
+
+    # derive the graduated range at the home pose (same recipe as the Franka
+    # comment in robot_configs.py, budget 10 cm TCP displacement)
+    arm_mg.joint_pos = home
+    mujoco.mj_forward(model, data)
+    tcp_home = tcp_pos()
+    w = np.arange(1, len(home) + 1, dtype=float)
+    J_p = np.asarray(rv.get_jacobian(arm_mg_id, [arm_mg_id]))[:3]
+    dq = w * 0.1 / np.linalg.norm(J_p @ w)
+
+    rng = np.random.RandomState(DR_SEED)
+    renderer, cam, mj_data = _diag_renderer(env)
+    tiles = []
+    for k in range(DR_TILES):
+        q = home if k == 0 else home + rng.uniform(-dq, dq)
+        arm_mg.joint_pos = q
+        mujoco.mj_forward(model, mj_data)
+        disp = np.linalg.norm(tcp_pos() - tcp_home) * 100
+        renderer.update_scene(mj_data, camera=cam)
+        label = "home (as every recorded episode starts)" if k == 0 else \
+            f"draw {k} · TCP moved {disp:.1f} cm"
+        tiles.append((label, renderer.render()))
+        print(f"[init_pose_noise] {label}")
+    renderer.close()
+
+    # measured TCP spread over many draws
+    N_DRAWS = 500
+    disps = []
+    for _ in range(N_DRAWS):
+        arm_mg.joint_pos = home + rng.uniform(-dq, dq)
+        mujoco.mj_forward(model, data)
+        disps.append(np.linalg.norm(tcp_pos() - tcp_home) * 100)
+    disps = np.asarray(disps)
+    arm_mg.joint_pos = home
+    mujoco.mj_forward(model, data)
+
+    grid_media = "init_pose_noise_grid.png"
+    _tile_grid(
+        tiles,
+        "Robot init-pose noise — inert for PiPER-X (range derived here with the Franka recipe)",
+        OUT / grid_media,
+    )
+
+    ink, ink2, hue, surface = "#0b0b0b", "#52514e", "#2a78d6", "#fcfcfb"
+    fig, ax = plt.subplots(figsize=(6.6, 3.2), facecolor=surface)
+    ax.set_facecolor(surface)
+    ax.hist(disps, bins=40, color=hue, edgecolor=surface, linewidth=0.4)
+    ax.axvline(10, color=ink2, linestyle="--", linewidth=1)
+    ax.text(10, 1.02, "10 cm design budget", transform=ax.get_xaxis_transform(),
+            ha="center", fontsize=8, color=ink2)
+    ax.set_xlabel("TCP displacement from home [cm]", fontsize=9, color=ink2)
+    ax.set_ylabel("draws", fontsize=9, color=ink2)
+    ax.set_title(f"TCP displacement over {N_DRAWS} draws — "
+                 f"p95 {np.percentile(disps, 95):.1f} cm, max {disps.max():.1f} cm",
+                 fontsize=10, color=ink)
+    ax.tick_params(colors=ink2, labelsize=8)
+    ax.grid(axis="y", color="#e4e3df", linewidth=0.8)
+    ax.set_axisbelow(True)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color(ink2)
+    fig.tight_layout()
+    hist_media = "init_pose_noise_spread.png"
+    fig.savefig(OUT / hist_media, dpi=110, facecolor=surface)
+
+    _write_fragment(
+        "init_pose_noise",
+        {
+            "id": "init_pose_noise",
+            "group": "always-on DR",
+            "title": "Robot init-pose noise — inert for PiPER-X",
+            "desc": "The sampler perturbs the robot's start pose per episode "
+            "(graduated per joint so the TCP stays within ~10 cm), but only "
+            "if the robot config defines init_qpos_noise_range — and "
+            f"PiperXRobotConfig ships None (measured: stock={stock_range!r}), "
+            "so every PiPER-X episode starts at exactly the home pose. Tiles "
+            "show what the mechanism would add, using a 6-joint range derived "
+            "with the documented Franka recipe (dq = w·0.1/‖J_p·w‖).",
+            "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py init_pose_noise",
+            "metrics": f"stock range: None (inert) · derived range "
+            f"[{', '.join(f'{x:.3f}' for x in dq)}] rad · TCP displacement "
+            f"over {N_DRAWS} draws: mean {disps.mean():.1f} / p95 "
+            f"{np.percentile(disps, 95):.1f} / max {disps.max():.1f} cm "
+            f"(budget 10 cm)",
+            "media": [
+                {"type": "image", "file": grid_media},
+                {"type": "image", "file": hist_media},
+            ],
+        },
+    )
+
+
+def demo_base_pose_noise() -> None:
+    """Robot base-pose randomization (task sampler, always on): the mocap base
+    is teleported per episode — uniform ±3 cm on each of x/y/z, plus ±15° yaw
+    applied with probability BASE_YAW_PROB (else the base stays square). The
+    tile grid holds the DR_SEED layout fixed and re-rolls only the base; the
+    rollout runs the full policy on a fresh episode whose base the sampler
+    noised itself, proving IK / cuRobo plans / obstacle poses all follow the
+    moved base (world targets are re-expressed in the live base frame)."""
+    import imageio.v2 as imageio
+    import mujoco
+    import numpy as np
+    from scipy.spatial.transform import Rotation as R
+
+    from molmo_spaces.data_generation.config.piper_x_cubes_in_cup_datagen import (
+        PiperXCubesInCupDataGenConfig,
+        PiperXCubesInCupTaskSampler,
+    )
+    from molmo_spaces.utils.mj_model_and_data_utils import body_aabb
+    from molmo_spaces.utils.pose import pose_mat_to_7d
+
+    pos_lim = PiperXCubesInCupTaskSampler.BASE_POS_NOISE
+    yaw_lim = PiperXCubesInCupTaskSampler.BASE_YAW_NOISE
+    yaw_p = PiperXCubesInCupTaskSampler.BASE_YAW_PROB
+
+    def _label(T: np.ndarray) -> str:
+        d = T[:3, 3] * 100
+        yaw = np.degrees(np.arctan2(T[1, 0], T[0, 0]))
+        return f"dx {d[0]:+.1f} dy {d[1]:+.1f} dz {d[2]:+.1f} cm · yaw {yaw:+.1f}°"
+
+    # --- tile grid: layout fixed, base re-rolled ------------------------------
+    _, task = _make_dr_task(DR_SEED)
+    env = task.env
+    rv = env.robots[0].robot_view
+    sampler_draw = rv.base.pose.copy()  # the sampler's own draw for this episode
+
+    # NOT DR_SEED: the sampler's base draw is the first pull from the global
+    # np.random stream seeded with DR_SEED, so the same seed here would make
+    # re-roll 1 duplicate the sampler's draw (tile 1)
+    rng = np.random.RandomState(DR_SEED + 1)
+    renderer, cam, mj_data = _diag_renderer(env)
+    tiles = []
+    for k in range(DR_TILES):
+        if k == 0:
+            T, label = np.eye(4), "nominal mount (world origin)"
+        elif k == 1:
+            T, label = sampler_draw, f"sampler's draw · {_label(sampler_draw)}"
+        else:
+            T = np.eye(4)
+            T[:3, 3] = rng.uniform(-pos_lim, pos_lim, 3)
+            if rng.random_sample() < yaw_p:  # same gate as the sampler
+                T[:3, :3] = R.from_euler("z", rng.uniform(-yaw_lim, yaw_lim)).as_matrix()
+            label = f"re-roll {k - 1} · {_label(T)}"
+        rv.base.pose = T
+        mujoco.mj_forward(env.current_model, mj_data)
+        renderer.update_scene(mj_data, camera=cam)
+        tiles.append((label, renderer.render()))
+        print(f"[base_pose_noise] {label}")
+    renderer.close()
+    grid_media = "base_pose_noise_grid.png"
+    _tile_grid(
+        tiles,
+        f"Robot base-pose noise — ±{pos_lim * 100:.0f} cm xyz, "
+        f"±{np.degrees(yaw_lim):.0f}° yaw with p={yaw_p} "
+        "(layout fixed, base re-rolled)",
+        OUT / grid_media,
+    )
+    del task
+    gc.collect()
+
+    # --- full-episode proof on the sampler's own draw -------------------------
+    cfg = PiperXCubesInCupDataGenConfig()
+    _set_noise(cfg, NOISE_DEFAULT)
+    _, task = _make_task(cfg, NOISE_SEED)
+    policy = cfg.policy_config.policy_factory(cfg, task)
+    task.register_policy(policy)
+    observation, _ = task.reset()
+
+    env = task.env
+    rv = env.robots[0].robot_view
+    base_T = rv.base.pose.copy()
+    recorded = np.asarray(task.config.task_config.robot_base_pose)
+    base_kept = bool(np.allclose(pose_mat_to_7d(base_T), recorded, atol=1e-6))
+    active = _cubes_on_shelf(task)
+    print(f"[base_pose_noise] rollout base: {_label(base_T)} "
+          f"(survived task.reset: {base_kept}) · {len(active)} cube(s)")
+
+    renderer, cam, mj_data = _diag_renderer(env)
+    video_media = "base_pose_noise_rollout.mp4"
+    writer = imageio.get_writer(OUT / video_media, format="ffmpeg",
+                                fps=cfg.fps, quality=6)
+    steps, err = 0, None
+    try:
+        for _ in range(20000):
+            action = policy.get_action(observation)
+            if action is None or action.get("done"):
+                break
+            observation, _r, terminal, truncated, _i = task.step(action)
+            renderer.update_scene(mj_data, camera=cam)
+            writer.append_data(renderer.render())
+            steps += 1
+            if terminal or truncated:
+                break
+    except Exception as e:  # noqa: BLE001
+        err = str(e).splitlines()[0]
+        print(f"[base_pose_noise] episode aborted at step {steps}: {err}")
+    writer.close()
+    renderer.close()
+
+    # outcome: active cubes whose center ended inside the cup cylinder
+    data = env.current_data
+    om = env.object_managers[env.current_batch_index]
+    cup = om.get_object_by_name("cup")
+    center, size = body_aabb(data.model, data, cup.object_id)
+    rim_z, r_in = center[2] + size[2] / 2, min(size[0], size[1]) / 2
+    in_cup = 0
+    for name in active:
+        p = om.get_object_by_name(name).position
+        if np.linalg.norm(p[:2] - center[:2]) < r_in and p[2] < rim_z:
+            in_cup += 1
+    outcome = f"{in_cup}/{len(active)} cubes in cup, {steps} steps" + \
+        (f" · aborted: {err}" if err else "")
+    print(f"[base_pose_noise] rollout outcome: {outcome}")
+
+    _write_fragment(
+        "base_pose_noise",
+        {
+            "id": "base_pose_noise",
+            "group": "task sampling",
+            "title": "Robot base-pose noise — ±3 cm xyz, ±15° yaw (p=0.5)",
+            "desc": "The sampler teleports the arm's mocap base every episode: "
+            "uniform ±3 cm on each translation axis, plus ±15° yaw applied "
+            "with probability 0.5 (else the base stays square). Planning is "
+            "unaffected because every IK/motion-gen call re-expresses world "
+            "targets (and cuRobo obstacles) in the live base frame; the exo "
+            "camera is scene-fixed so the diag view does not move with the "
+            "base. Grid: same layout, base re-rolled. Video: full policy "
+            "episode on a sampler-noised base.",
+            "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py base_pose_noise",
+            "metrics": f"sampler draw (rollout, seed {NOISE_SEED}): "
+            f"{_label(base_T)} · base survives task.reset: {base_kept} · "
+            f"outcome: {outcome}",
+            "media": [
+                {"type": "image", "file": grid_media},
+                {"type": "video", "file": video_media,
+                 "label": f"full episode, base at {_label(base_T)}"},
+            ],
+        },
+    )
+    del task, policy
+    gc.collect()
+
+
+def demo_offline_rerender() -> None:
+    """Delegates to scripts/viz/piper_x_offline_rerender.py (the working post-hoc
+    re-render path — the repo's offline DR renderer class is a stub). Replays
+    the successful test-dataset episode and re-renders it under 3 visual draws;
+    the script writes the manifest fragment itself (--fragment)."""
+    for stale in OUT.glob("rerender_*"):  # traj index may differ between runs
+        stale.unlink()
+    r = subprocess.run(
+        [sys.executable, str(REPO / "scripts/viz/piper_x_offline_rerender.py"),
+         "--draws", "3", "--fragment", "--out", str(OUT)],
+        cwd=REPO,
+        env={**os.environ, "VIEW": "0"},
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"piper_x_offline_rerender.py failed (exit {r.returncode})")
 
 
 def merge_manifest() -> None:
@@ -380,7 +1123,6 @@ def merge_manifest() -> None:
         p = _fragment(name)
         if p.exists():
             demos.append(json.loads(p.read_text()))
-    demos.append(INACTIVE_NOTE)
     (OUT / "manifest.json").write_text(json.dumps({"demos": demos}, indent=2))
     print(f"[demos] merged manifest: {OUT / 'manifest.json'} ({len(demos)} entries)")
 
@@ -403,6 +1145,12 @@ def main() -> int:
                 "task_sampling": demo_task_sampling,
                 "action_noise": demo_action_noise,
                 "camera_randomization": demo_camera_randomization,
+                "lighting_randomization": demo_lighting_randomization,
+                "texture_randomization": demo_texture_randomization,
+                "dynamics_randomization": demo_dynamics_randomization,
+                "init_pose_noise": demo_init_pose_noise,
+                "base_pose_noise": demo_base_pose_noise,
+                "offline_rerender": demo_offline_rerender,
             }[name]()
     else:
         # one subprocess per demo: fresh GL context + config class state

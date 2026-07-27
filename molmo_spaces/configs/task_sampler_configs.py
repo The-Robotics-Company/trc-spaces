@@ -26,6 +26,17 @@ class BaseMujocoTaskSamplerConfig(Config):
     randomize_textures_all: bool = False  # Whether to randomize the textures of the scene
     randomize_robot_textures: bool = False  # Whether to randomize the textures of the robot
     randomize_dynamics: bool = False  # Whether to randomize the dynamics of the scene
+    # Optional discrete-color palette for texture DR: maps a geom-name substring
+    # -> list of rgba options. Matching visual geoms get ONE random palette pick
+    # per roll (instead of continuous rgba jitter); gloss still jitters. E.g.
+    # {"cube_visual": [green, yellow]} forces cubes to be only green or yellow.
+    categorical_geom_rgba: dict | None = None
+    # Optional external texture image files (e.g. a DTD subset) fed to
+    # TextureRandomizer as texture_paths: per roll, every TEXTURED visual geom
+    # gets one of these images instead of a texture recycled from the model.
+    # Only geoms whose authored material has a texture are affected (in the
+    # cubes-in-cup scene: floor, backdrop, cup body).
+    dr_texture_paths: list[str] | None = None
 
     # Failure recovery parameters (used by ParallelRolloutRunner)
     max_allowed_sequential_task_sampler_failures: int = 10

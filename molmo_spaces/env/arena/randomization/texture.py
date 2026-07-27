@@ -166,6 +166,9 @@ class TextureRandomizer:
         randomize_material_rgba (bool): If True, randomizes material RGBA colors
         randomize_material_specular (bool): If True, randomizes material specular
         randomize_material_shininess (bool): If True, randomizes material shininess
+        randomize_material_reflectance (bool): If True, randomizes material reflectance
+            (mirror term; the one BRDF knob the classic MuJoCo renderer honors that
+            specular/shininess don't cover)
         randomize_texture (bool): If True, randomizes texture bitmaps from loaded textures.
             Default behavior uses textures already loaded in the model XML.
         texture_paths (list[str] | None): Optional list of paths to external texture image files (PNG, etc.).
@@ -175,6 +178,13 @@ class TextureRandomizer:
         rgba_perturbation_size (float): Magnitude of RGBA color randomization
         specular_perturbation_size (float): Magnitude of specular randomization
         shininess_perturbation_size (float): Magnitude of shininess randomization
+        reflectance_perturbation_size (float): Magnitude of reflectance randomization
+        categorical_geom_rgba (dict | None): Optional discrete-color palette. Maps a
+            geom-name substring -> list of rgba options; any visual geom whose name
+            contains the key has its base color set to ONE randomly chosen palette
+            entry per roll (instead of the continuous rgba jitter). Specular /
+            shininess / reflectance still jitter. Used e.g. to force cubes to be
+            only green OR yellow.
 
     Note:
         MjData should be passed to the randomize() method, not to __init__.
@@ -210,12 +220,15 @@ class TextureRandomizer:
         randomize_material_rgba: bool = True,
         randomize_material_specular: bool = True,
         randomize_material_shininess: bool = True,
+        randomize_material_reflectance: bool = True,
         randomize_texture: bool = True,
         texture_paths: list[str] | None = None,
         scene_metadata: dict | None = None,
         rgba_perturbation_size: float = 0.1,
         specular_perturbation_size: float = 0.1,
         shininess_perturbation_size: float = 0.1,
+        reflectance_perturbation_size: float = 0.1,
+        categorical_geom_rgba: dict | None = None,
     ):
         self.model = model
         self.scene_metadata = scene_metadata
@@ -277,11 +290,14 @@ class TextureRandomizer:
         self.randomize_material_rgba = randomize_material_rgba
         self.randomize_material_specular = randomize_material_specular
         self.randomize_material_shininess = randomize_material_shininess
+        self.randomize_material_reflectance = randomize_material_reflectance
         self.randomize_texture = randomize_texture
 
         self.rgba_perturbation_size = rgba_perturbation_size
         self.specular_perturbation_size = specular_perturbation_size
         self.shininess_perturbation_size = shininess_perturbation_size
+        self.reflectance_perturbation_size = reflectance_perturbation_size
+        self.categorical_geom_rgba = categorical_geom_rgba or {}
 
         # Load texture files if provided, or extract existing textures from model (default)
         self.texture_bitmaps: list[np.ndarray] = []
@@ -583,6 +599,7 @@ class TextureRandomizer:
                 defaults["mat_rgba"] = np.array(self.model.mat_rgba[mat_id])
                 defaults["mat_specular"] = float(self.model.mat_specular[mat_id])
                 defaults["mat_shininess"] = float(self.model.mat_shininess[mat_id])
+                defaults["mat_reflectance"] = float(self.model.mat_reflectance[mat_id])
                 defaults["mat_id"] = mat_id
 
                 # Save texture ID instead of bitmap (much faster, less memory)
@@ -595,6 +612,7 @@ class TextureRandomizer:
                 defaults["mat_rgba"] = None
                 defaults["mat_specular"] = None
                 defaults["mat_shininess"] = None
+                defaults["mat_reflectance"] = None
                 defaults["mat_id"] = -1
                 defaults["texture_id"] = -1
 
@@ -705,15 +723,29 @@ class TextureRandomizer:
                         name_to_geom_id[name] = i
         return name_to_geom_id
 
-    def _randomize_material_attributes(self, geom_id: int, mat_id: int) -> None:
-        """Randomize material attributes (rgba, specular, shininess) if enabled."""
+    def _randomize_material_attributes(
+        self, geom_id: int, mat_id: int, categorical_rgba=None
+    ) -> None:
+        """Randomize material attributes (rgba, specular, shininess, reflectance) if enabled.
+
+        If categorical_rgba is given, the material's base color is set to that
+        (fixed) palette pick instead of the continuous rgba jitter; the gloss
+        axes (specular/shininess/reflectance) still jitter.
+        """
         if mat_id >= 0:
-            if self.randomize_material_rgba:
+            if categorical_rgba is not None:
+                alpha = float(self.model.mat_rgba[mat_id][3])
+                self.model.mat_rgba[mat_id] = np.array(
+                    [categorical_rgba[0], categorical_rgba[1], categorical_rgba[2], alpha]
+                )
+            elif self.randomize_material_rgba:
                 self._randomize_material_rgba_direct(geom_id, mat_id)
             if self.randomize_material_specular:
                 self._randomize_material_specular_direct(geom_id, mat_id)
             if self.randomize_material_shininess:
                 self._randomize_material_shininess_direct(geom_id, mat_id)
+            if self.randomize_material_reflectance:
+                self._randomize_material_reflectance_direct(geom_id, mat_id)
 
     def randomize_object(self, thor_object: "MlSpacesObject", data: MjData | None = None) -> None:
         """
@@ -1192,6 +1224,29 @@ class TextureRandomizer:
                     f"{colors_randomized} colors by category (material-based)"
                 )
 
+    def _pick_categorical_rgba(self, name: str):
+        """If the geom name matches a categorical palette key (substring match),
+        return one randomly chosen rgba from that palette; else None."""
+        if not self.categorical_geom_rgba:
+            return None
+        for key, palette in self.categorical_geom_rgba.items():
+            if key in name and palette:
+                idx = int(self.random_state.randint(len(palette)))
+                return np.asarray(palette[idx], dtype=float)
+        return None
+
+    def _randomize_colors_and_materials(self, name: str, geom_id: int, mat_id: int) -> None:
+        """Color + material randomization for a non-textured geom. Honors the
+        categorical palette: a matching geom gets a discrete color pick (on its
+        material if it has one, else on geom_rgba), while gloss still jitters."""
+        cat = self._pick_categorical_rgba(name)
+        if cat is not None and mat_id < 0:
+            alpha = float(self.model.geom_rgba[geom_id][3])
+            self.model.geom_rgba[geom_id] = np.array([cat[0], cat[1], cat[2], alpha])
+        elif cat is None and self.randomize_geom_rgba:
+            self._randomize_geom_rgba_direct(geom_id)
+        self._randomize_material_attributes(geom_id, mat_id, categorical_rgba=cat)
+
     def _randomize_geom_rgba_direct(self, geom_id: int):
         """Randomize geom RGBA color using direct geom_id (faster). Preserves alpha channel."""
         defaults = self._geom_id_to_defaults.get(geom_id)
@@ -1241,6 +1296,17 @@ class TextureRandomizer:
             )
             new_shininess = np.clip(defaults["mat_shininess"] + delta, 0.0, 1.0)
             self.model.mat_shininess[mat_id] = new_shininess
+
+    def _randomize_material_reflectance_direct(self, geom_id: int, mat_id: int):
+        """Randomize material reflectance using direct IDs (faster)."""
+        defaults = self._geom_id_to_defaults.get(geom_id)
+        if defaults and defaults.get("mat_reflectance") is not None:
+            delta = self.random_state.uniform(
+                low=-self.reflectance_perturbation_size,
+                high=self.reflectance_perturbation_size,
+            )
+            new_reflectance = np.clip(defaults["mat_reflectance"] + delta, 0.0, 1.0)
+            self.model.mat_reflectance[mat_id] = new_reflectance
 
     def _get_texture_id_for_geom(self, geom_id: int) -> int:
         """
@@ -1836,16 +1902,12 @@ class TextureRandomizer:
                         self.model.mat_rgba[mat_id] = np.array([1.0, 1.0, 1.0, original_mat_alpha])
                 else:
                     # No texture or texture randomization disabled, randomize colors and materials
-                    if self.randomize_geom_rgba:
-                        self._randomize_geom_rgba_direct(geom_id)
-                        colors_randomized += 1
-                    self._randomize_material_attributes(geom_id, mat_id)
+                    self._randomize_colors_and_materials(name, geom_id, mat_id)
+                    colors_randomized += 1
             else:
                 # No texture, randomize colors and materials
-                if self.randomize_geom_rgba:
-                    self._randomize_geom_rgba_direct(geom_id)
-                    colors_randomized += 1
-                self._randomize_material_attributes(geom_id, mat_id)
+                self._randomize_colors_and_materials(name, geom_id, mat_id)
+                colors_randomized += 1
 
         # Forward pass to propagate changes
         # IMPORTANT: mj_forward must be called after texture changes for them to take effect

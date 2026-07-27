@@ -92,21 +92,40 @@ if GRASP_LIBRARY not in USER_GRASP_LIBRARIES:
     register_user_grasp_library(_GRASP_ROOT, _ASSET_LIB, _ASSET_LIB_NAME)
 
 
+# Per-episode camera noise, following the upstream conventions in
+# configs/camera_configs.py: wrist cams get the DROID ZED-mini treatment
+# (±4° FOV, ±1.5/0.5/1 cm mount, (8,4,4)° orientation), fixed exos the
+# RBY1-head treatment (±3° FOV, ±1 cm, ±4°) — gentler, since the exo frames
+# the whole workspace from 1.2 m and has no visibility re-check.
+_WRIST_CAM_NOISE = dict(
+    fov_noise_degrees=(-4.0, 4.0),
+    pos_noise_range=((-0.015, -0.005, -0.01), (0.015, 0.005, 0.01)),
+    orientation_noise_degrees=(8.0, 4.0, 4.0),
+)
+_EXO_CAM_NOISE = dict(
+    fov_noise_degrees=(-3.0, 3.0),
+    pos_noise_range=((-0.01, -0.01, -0.01), (0.01, 0.01, 0.01)),
+    orientation_noise_degrees=(4.0, 4.0, 4.0),
+)
+
+
 class PiperXCubesInCupCameraSystem(PiperXCameraSystem):
     """Same wrist cam, but the exo camera is the WORLD-fixed scene-level one
     (asset_library/cubes_in_cup_scene.xml), not the base-mounted copy inside
     piper_x.xml — the base pose is randomized per episode and the diag view
-    must not move with it."""
+    must not move with it. Both cameras get per-episode mount + FOV noise."""
 
     cameras: list[AllCameraTypes] = [
         MjcfCameraConfig(
             name="wrist_camera",
             mjcf_name="wrist_camera",
             robot_namespace="robot_0/",
+            **_WRIST_CAM_NOISE,
         ),
         MjcfCameraConfig(
             name="exo_camera",
             mjcf_name="exo_camera",  # scene-level, no robot namespace
+            **_EXO_CAM_NOISE,
         ),
     ]
 
@@ -153,7 +172,7 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
     # parking spots for inactive cubes: on the floor behind the shelf legs,
     # far outside the workspace and the wrist camera's view of the shelf
     _PARK_XY = ((0.9, -0.6), (0.9, -0.45), (0.9, 0.45), (0.9, 0.6))
-    _PARK_Z = -0.725  # floor top is -0.74; cube half-size 0.015
+    _PARK_Z = -0.725  # floor top (-0.74) + cube half-size (0.015)
     # Camera aim point: fixed 5 cm above the upper board (top z=0.13), pulled
     # from the board center (x=0.445) toward the arm so the framing keeps more
     # of the arm in view. The stock workspace center (centroid of first cube +
@@ -955,6 +974,35 @@ class PiperXCuroboIKPickAndPlacePlannerPolicy(PickAndPlacePlannerPolicy):
         ]
 
 
+# Cube base-colour palette for texture DR: each cube is randomized to green OR
+# yellow, independently (per-cube own material). Keyed by geom-name substring so
+# it matches cube_visual, cube2_cube_visual, ... See
+# TextureRandomizer.categorical_geom_rgba. Only active when randomize_textures=True.
+CUBE_GREEN = [0.15, 0.60, 0.15, 1.0]
+CUBE_YELLOW = [0.90, 0.75, 0.10, 1.0]
+CUBE_COLOR_PALETTE = {"cube_visual": [CUBE_GREEN, CUBE_YELLOW]}
+
+# Real-photo background textures for texture DR: an evenly-spaced subset of DTD
+# (Describable Textures Dataset, assets/textures/dtd — gitignored; fetch with
+#   wget https://www.robots.ox.ac.uk/~vgg/data/dtd/download/dtd-r1.0.1.tar.gz
+# and extract under assets/textures/). Fed to TextureRandomizer via
+# dr_texture_paths: per roll, each TEXTURED visual geom — in this scene exactly
+# floor, backdrop wall and cup body — gets one random photo instead of a flat
+# jittered color. Only active when randomize_textures=True.
+_DTD_DIR = _REPO_ROOT / "assets" / "textures" / "dtd" / "images"
+_DTD_N = 200  # bitmaps are loaded into RAM at randomizer init; keep bounded
+
+
+def _dtd_texture_paths() -> list[str] | None:
+    if not _DTD_DIR.is_dir():
+        log.warning(f"DTD not found at {_DTD_DIR} — texture swaps will recycle "
+                    "model textures instead of real photos (see comment above)")
+        return None
+    imgs = sorted(_DTD_DIR.rglob("*.jpg"))
+    step = max(1, len(imgs) // _DTD_N)
+    return [str(p) for p in imgs[::step][:_DTD_N]] or None
+
+
 @register_config("PiperXCubesInCupDataGenConfig")
 class PiperXCubesInCupDataGenConfig(PickAndPlaceDataGenConfig):
     """PiPER-X picks a cube and places it into the in-scene cup on the shelf."""
@@ -989,6 +1037,10 @@ class PiperXCubesInCupDataGenConfig(PickAndPlaceDataGenConfig):
         filter_for_grasps=True,  # excludes the grasp-less cup from pickup candidates
         check_robot_placement_visibility=False,  # we don't drive the robot around
         randomize_textures=False,
+        # cubes are re-coloured green|yellow (per-cube) when texture DR is on
+        categorical_geom_rgba=CUBE_COLOR_PALETTE,
+        # floor, backdrop + cup body get a random DTD photo per roll when texture DR is on
+        dr_texture_paths=_dtd_texture_paths(),
     )
     policy_config: PickAndPlacePlannerPolicyConfig = PickAndPlacePlannerPolicyConfig(
         policy_cls=PiperXCuroboIKPickAndPlacePlannerPolicy,
@@ -1036,6 +1088,7 @@ class PiperXBehindBoardRandomCamSystem(CameraSystemConfig):
             name="wrist_camera",
             mjcf_name="wrist_camera",
             robot_namespace="robot_0/",
+            **_WRIST_CAM_NOISE,
         ),
         RandomizedExocentricCameraConfig(
             name="exo_camera",

@@ -41,6 +41,8 @@
     <material name="piper_dark" rgba="0.12 0.12 0.12 1" specular="0.35" shininess="0.35"/>
     <material name="piper_mid" rgba="0.26 0.26 0.26 1" specular="0.4" shininess="0.4"/>
     <material name="piper_grip" rgba="0.18 0.18 0.18 1" specular="0.3" shininess="0.3"/>
+    <!-- printed wrist-cam mount: blue PLA -->
+    <material name="mount_blue" rgba="0.15 0.35 0.8 1" specular="0.3" shininess="0.3"/>
 
     <mesh name="base_link" file="base_link.stl"/>
     <mesh name="link1" file="link1.stl"/>
@@ -110,7 +112,7 @@
                     <!-- camera mount bracket (clamps the wrist boss, same frame as
                          the STL; slid 5 mm toward the fingers, matching
                          mount_z_shift 12->17 in the CAD) -->
-                    <geom class="visual" mesh="wrist_cam_mount" material="piper_dark"
+                    <geom class="visual" mesh="wrist_cam_mount" material="mount_blue"
                           pos="0 0 0.005"/>
                     <!-- mount collision: same 9 spheres as the cuRobo model
                          (curobo_config/piper_x_spheres.yml, gripper_base) -->

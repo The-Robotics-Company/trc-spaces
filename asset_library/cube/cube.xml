@@ -1,11 +1,21 @@
 <mujoco model="cube">
   <!-- 3 cm pick cube (matches reference piper-x-policy cube_cfg: CUBE_SIZE=0.03,
-       mass 0.02). Colour set per-instance in the scene; default = reference red. -->
+       mass 0.02). Split into a COLLISION geom (physics, invisible) and a VISUAL
+       geom (contype==0, carries the material) so TextureRandomizer can re-skin
+       it: base colour is randomized categorically to green OR yellow, and the
+       gloss (specular/shininess/reflectance) jitters. Each attached instance
+       gets its own prefixed material (cube_mat, cube2_cube_mat, ...), so colours
+       are independent per cube. Default (DR off) = green. -->
+  <asset>
+    <material name="cube_mat" rgba="0.15 0.6 0.15 1" specular="0.3" shininess="0.3"/>
+  </asset>
   <worldbody>
     <body name="cube" pos="0 0 0">
       <freejoint/>
-      <geom name="cube_geom" type="box" size="0.015 0.015 0.015" rgba="0.80 0.15 0.15 1"
+      <geom name="cube_geom" type="box" size="0.015 0.015 0.015" rgba="0 0 0 0"
             mass="0.02" friction="1.0 0.02 0.001"/>
+      <geom name="cube_visual" type="box" size="0.0152 0.0152 0.0152"
+            material="cube_mat" contype="0" conaffinity="0" mass="0"/>
     </body>
   </worldbody>
 </mujoco>

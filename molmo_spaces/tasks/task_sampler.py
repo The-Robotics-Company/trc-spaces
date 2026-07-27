@@ -868,9 +868,12 @@ class BaseMujocoTaskSampler:
                 randomize_material_specular=True,
                 randomize_material_shininess=True,
                 randomize_texture=True,
-                texture_paths=None,  # None = use model textures (default)
+                # None = recycle model textures (default); a list of image
+                # paths (e.g. a DTD subset) makes texture swaps draw from them
+                texture_paths=self.config.task_sampler_config.dr_texture_paths,
                 scene_metadata=env.current_scene_metadata,
                 rgba_perturbation_size=0.2,
+                categorical_geom_rgba=self.config.task_sampler_config.categorical_geom_rgba,
             )
         if self.config.task_sampler_config.randomize_dynamics:
             dynamics_seed = base_seed + 2 if base_seed is not None else None

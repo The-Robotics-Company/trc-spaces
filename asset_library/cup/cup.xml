@@ -5,7 +5,17 @@
        reference PhysX convexDecomposition token) so the hollow interior survives
        and a 3 cm cube drops in. freejoint => a knocked cup is a detectable failure. -->
   <asset>
-    <mesh name="cup_visual" file="mesh/cup_visual.obj"/>
+    <!-- visual shell split at z=0.113 (top 2.5 cm) so the rim reads white and
+         the body reads warm. Meshes cut with scratchpad/slice_cup.py. -->
+    <mesh name="cup_visual_top" file="mesh/cup_visual_top.obj"/>
+    <mesh name="cup_visual_body" file="mesh/cup_visual_body.obj"/>
+    <material name="cup_top_mat" rgba="0.95 0.95 0.95 1" specular="0.3" shininess="0.3"/>
+    <!-- flat texture (same warm color) rather than a bare rgba: geoms whose
+         material HAS a texture are texture-swap targets for the DR randomizer
+         (dr_texture_paths / DTD photos), like the floor and backdrop. The body
+         mesh carries cylindrical UVs (u = azimuth, v = height) for this. -->
+    <texture name="cup_body_tex" type="2d" builtin="flat" rgb1="0.86 0.48 0.26" width="64" height="64"/>
+    <material name="cup_body_mat" texture="cup_body_tex" specular="0.2" shininess="0.2"/>
     <mesh name="cup_coll_00" file="mesh/cup_coll_00.obj"/>
     <mesh name="cup_coll_01" file="mesh/cup_coll_01.obj"/>
     <mesh name="cup_coll_02" file="mesh/cup_coll_02.obj"/>
@@ -32,8 +42,10 @@
     <body name="cup" pos="0 0 0">
       <freejoint/>
       <inertial pos="0 0 0.05" mass="0.12" diaginertia="2e-4 2e-4 1e-4"/>
-      <geom name="cup_visual" type="mesh" mesh="cup_visual" contype="0" conaffinity="0"
-            group="0" rgba="0.82 0.72 0.52 1"/>
+      <geom name="cup_visual" type="mesh" mesh="cup_visual_body" contype="0" conaffinity="0"
+            group="0" material="cup_body_mat"/>
+      <geom name="cup_visual_top" type="mesh" mesh="cup_visual_top" contype="0" conaffinity="0"
+            group="0" material="cup_top_mat"/>
       <geom name="cup_coll_00" type="mesh" mesh="cup_coll_00" group="3" rgba="0.8 0.75 0.55 0.4" friction="1.0 0.02 0.001"/>
       <geom name="cup_coll_01" type="mesh" mesh="cup_coll_01" group="3" rgba="0.8 0.75 0.55 0.4" friction="1.0 0.02 0.001"/>
       <geom name="cup_coll_02" type="mesh" mesh="cup_coll_02" group="3" rgba="0.8 0.75 0.55 0.4" friction="1.0 0.02 0.001"/>

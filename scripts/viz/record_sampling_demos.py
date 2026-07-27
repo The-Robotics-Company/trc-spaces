@@ -40,6 +40,7 @@ ALL_DEMOS = [
     "task_sampling",
     "action_noise",
     "camera_randomization",
+    "camera_noise",
     "lighting_randomization",
     "texture_randomization",
     "dynamics_randomization",
@@ -373,6 +374,117 @@ def demo_camera_randomization() -> None:
     )
 
 
+def demo_camera_noise() -> None:
+    """Per-episode MJCF camera noise (stock config, always on): the wrist cam
+    gets ±4° FOV + ±1.5/0.5/1 cm mount + (8,4,4)° orientation jitter, the fixed
+    exo ±3° FOV + ±1 cm + ±4° — the upstream DROID-wrist / RBY1-head recipes.
+    Complements camera_randomization: that demo re-SAMPLES the exo pose from
+    scratch (randcam subversion); this one jitters the authored mounts, and it
+    applies to BOTH configs' wrist cam. Layout fixed; cameras re-rolled."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    N_ROLLS = 3  # + authored column
+    N_SPREAD = 200
+
+    sampler, task = _make_dr_task(DR_SEED)
+    env = task.env
+    cam_cfgs = task.config.camera_config.cameras  # [wrist, exo]
+    names = [c.name for c in cam_cfgs]
+
+    def snapshot():
+        out = {}
+        for n in names:
+            cam = env.camera_manager.registry[n]
+            out[n] = (cam.get_pose().copy(), float(cam.fov))
+        return out
+
+    def deltas(ref, cur, n):
+        (T0, f0), (T, f) = ref[n], cur[n]
+        dp = np.linalg.norm(T[:3, 3] - T0[:3, 3]) * 100
+        c = (np.trace(T0[:3, :3].T @ T[:3, :3]) - 1) / 2
+        da = np.degrees(np.arccos(np.clip(c, -1, 1)))
+        return dp, da, f - f0
+
+    # authored: disable the noise fields, re-setup, snapshot the clean mounts
+    saved = [(c.fov_noise_degrees, c.pos_noise_range, c.orientation_noise_degrees)
+             for c in cam_cfgs]
+    for c in cam_cfgs:
+        c.fov_noise_degrees = c.pos_noise_range = c.orientation_noise_degrees = None
+    sampler.setup_cameras(env)
+    ref = snapshot()
+    cols = [("authored mounts", {n: env.render_rgb_frame(n).copy() for n in names})]
+    for c, (fn, pn, on) in zip(cam_cfgs, saved):
+        c.fov_noise_degrees, c.pos_noise_range, c.orientation_noise_degrees = fn, pn, on
+
+    for k in range(1, N_ROLLS + 1):
+        sampler.setup_cameras(env)
+        cur = snapshot()
+        parts = []
+        for n in names:
+            dp, da, df = deltas(ref, cur, n)
+            parts.append(f"{n.split('_')[0]}: {dp:.1f}cm {da:.1f}° fov{df:+.1f}°")
+        label = f"re-roll {k} · " + " · ".join(parts)
+        cols.append((label, {n: env.render_rgb_frame(n).copy() for n in names}))
+        print(f"[camera_noise] {label}")
+
+    fig, axes = plt.subplots(len(names), len(cols),
+                             figsize=(4.3 * len(cols), 2.6 * len(names)))
+    for j, (label, imgs) in enumerate(cols):
+        for i, n in enumerate(names):
+            ax = axes[i][j]
+            ax.imshow(imgs[n])
+            ax.axis("off")
+            if i == 0:
+                ax.set_title(label, fontsize=7)
+            if j == 0:
+                ax.text(-0.04, 0.5, n, transform=ax.transAxes, fontsize=9,
+                        rotation=90, va="center", ha="right")
+    fig.suptitle("Camera mount & FOV noise — authored vs per-episode re-rolls "
+                 "(layout fixed)", fontsize=12)
+    fig.tight_layout()
+    media = "camera_noise_grid.png"
+    fig.savefig(OUT / media, dpi=110)
+
+    # measured spread (no rendering)
+    spread = {n: [] for n in names}
+    for _ in range(N_SPREAD):
+        sampler.setup_cameras(env)
+        cur = snapshot()
+        for n in names:
+            spread[n].append(deltas(ref, cur, n))
+    stats = []
+    for n in names:
+        a = np.asarray(spread[n])
+        stats.append(f"{n}: pos ≤{a[:, 0].max():.1f} cm · rot ≤{a[:, 1].max():.1f}° "
+                     f"· fov {a[:, 2].min():+.1f}..{a[:, 2].max():+.1f}°")
+    metrics = f"over {N_SPREAD} rolls — " + "  |  ".join(stats)
+    print(f"[camera_noise] {metrics}")
+
+    _write_fragment(
+        "camera_noise",
+        {
+            "id": "camera_noise",
+            "group": "camera sampling",
+            "title": "Camera mount & FOV noise — wrist + exo",
+            "desc": "Per-episode jitter of the AUTHORED camera mounts (stock "
+            "config, both cameras; upstream DROID-wrist / RBY1-head recipes): "
+            "wrist ±4° FOV, ±1.5/0.5/1 cm, (8,4,4)° orientation; exo ±3° FOV, "
+            "±1 cm, ±4°. Complements the randomized exocentric camera above — "
+            "that path re-samples the exo pose from scratch (randcam config), "
+            "and its wrist cam gets this same jitter.",
+            "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py camera_noise",
+            "metrics": metrics,
+            "media": [{"type": "image", "file": media}],
+        },
+    )
+    del task
+    gc.collect()
+
+
 def _make_dr_task(seed: int, *, lighting=False, textures=False, dynamics=False):
     """Task with the opt-in DR flags set EXPLICITLY (config class attrs are
     shared in-process, so every flag is written every time, True or False).
@@ -488,26 +600,25 @@ def demo_lighting_randomization() -> None:
 
 
 def demo_texture_randomization() -> None:
-    """Authored baseline, one STOCK texture roll, then rolls with the visual-only
-    filter relaxed — all on the same seed-5 layout.
+    """Authored baseline + stock TextureRandomizer rolls on the seed-5 layout.
 
-    MEASURED FINDING the demo exists to show: the stock TextureRandomizer only
-    touches NAMED geoms with contype==0 (visual-only), and in this custom scene
-    that is exactly one geom (cup_visual) — the floor/boards/cubes are collision
-    geoms — so even with randomize_textures_all flipped on, per-episode texture
-    DR amounts to a +/-0.2 tint jitter on the cup. The relaxed rolls subclass
-    the randomizer to admit every named geom, purely to show what the mechanism
-    (rgba +/-0.2, specular/shininess +/-0.1, swaps from the model texture pool)
-    would do if the scene's geoms were eligible.
+    The boards were split into a collision geom + a visual geom (board1_visual,
+    board2_visual), so the STOCK randomizer — which only admits named contype==0
+    (visual-only) geoms — now reaches the table and shelf, not just the cup.
+    Every roll jitters, around authored values, each eligible material's rgba
+    (+/-0.15), specular / shininess / reflectance (reflectance is a newly-added
+    axis), and swaps a random DTD photo (dr_texture_paths) onto any geom that
+    already carries a texture — in this scene floor, backdrop wall, cup body.
 
-    The baseline comes from a separate no-flag task: sample_task already rolls
-    textures once. A fresh mujoco.Renderer per tile is required — texture
-    bitmaps upload to the GL context at renderer creation only."""
+    A fresh mujoco.Renderer per tile is required — texture bitmaps upload to the
+    GL context at renderer creation only."""
     import gc as _gc
 
-    import mujoco
     import numpy as np
 
+    from molmo_spaces.data_generation.config.piper_x_cubes_in_cup_datagen import (
+        CUBE_COLOR_PALETTE,
+    )
     from molmo_spaces.env.arena.randomization.texture import TextureRandomizer
 
     _, task0 = _make_dr_task(DR_SEED)  # all flags off -> authored look
@@ -518,70 +629,60 @@ def demo_texture_randomization() -> None:
     del task0
     _gc.collect()
 
-    sampler, task = _make_dr_task(DR_SEED, textures=True)
-    rnd = sampler.texture_randomizer
-    model = rnd.model
+    sampler, task = _make_dr_task(DR_SEED, textures=True)  # bakes empty-material pool
     env = task.env
     mj_data = env.mj_datas[env.current_batch_index]
+    model = mj_data.model
 
-    # undo the roll sample_task already applied (stock path => cup tint only),
-    # so the relaxed randomizer below saves AUTHORED values as its defaults
-    for gid, d in rnd._geom_id_to_defaults.items():
-        model.geom_rgba[gid] = d["geom_rgba"]
-
-    class _AllNamedGeomsTextureRandomizer(TextureRandomizer):
-        """Demo-only: relax the stock visual-only (contype==0) geom filter."""
-
-        def _build_name_to_geom_id(self):
-            out = {}
-            for i in range(self.model.ngeom):
-                n = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, i)
-                if n:
-                    out[n] = i
-            return out
-
-        def save_defaults(self):
-            self._defaults = {}
-            self._geom_id_to_defaults = {}
-            for name, gid in self._build_name_to_geom_id().items():
-                if name not in self.geom_names:
-                    continue
-                d = {"geom_rgba": np.array(self.model.geom_rgba[gid])}
-                mat_id = int(self.model.geom_matid[gid])
-                if mat_id >= 0:
-                    d["mat_rgba"] = np.array(self.model.mat_rgba[mat_id])
-                    d["mat_specular"] = float(self.model.mat_specular[mat_id])
-                    d["mat_shininess"] = float(self.model.mat_shininess[mat_id])
-                    d["mat_id"] = mat_id
-                    d["texture_id"] = (
-                        self._get_texture_id_for_geom(gid) if self.randomize_texture else -1
-                    )
-                else:
-                    d.update(mat_rgba=None, mat_specular=None, mat_shininess=None,
-                             mat_id=-1, texture_id=-1)
-                self._defaults[name] = d
-                self._geom_id_to_defaults[gid] = d
-
-    all_named = [
-        n for i in range(model.ngeom)
-        if (n := mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i))
-    ]
-    rnd_all = _AllNamedGeomsTextureRandomizer(
+    # fresh STOCK randomizer, geom_names=None -> auto all visual-only geoms
+    # (boards, floor, backdrop, cubes, cup). Perturbations enlarged for legibility
+    # in the montage; the mechanism is the stock code path. The cube palette forces
+    # cubes to green|yellow (categorical) and the DTD photo subset is the
+    # texture-swap pool (floor, backdrop, cup body), matching the datagen config.
+    dtd = task.config.task_sampler_config.dr_texture_paths
+    rnd = TextureRandomizer(
         model=model,
-        random_state=np.random.RandomState(DR_SEED + 1),  # texture stream seed, as init_scene does
-        geom_names=all_named,
+        random_state=np.random.RandomState(DR_SEED + 1),
+        geom_names=None,
         scene_metadata=env.current_scene_metadata,
-        rgba_perturbation_size=0.2,
+        rgba_perturbation_size=0.15,
+        specular_perturbation_size=0.4,
+        shininess_perturbation_size=0.4,
+        reflectance_perturbation_size=0.4,
+        categorical_geom_rgba=CUBE_COLOR_PALETTE,
+        texture_paths=dtd,
     )
+    eligible = list(rnd.geom_names)
+    print(f"[texture_randomization] eligible visual geoms: {eligible}")
 
-    def roll_stats(r):
-        rgba_changed = mat_swapped = 0
-        for gid, d in r._geom_id_to_defaults.items():
-            if not np.allclose(model.geom_rgba[gid], d["geom_rgba"], atol=1e-6):
+    def roll_stats():
+        # a geom counts as "re-colored" if EITHER its geom_rgba (no-material geoms)
+        # or its material rgba (material geoms, incl. categorical cubes) moved.
+        # "photo-swap" = the geom sits on a __TEXTURE_RANDOMIZER_MAT_ pool
+        # material (comparing against saved matid misses it: sample_task's own
+        # roll already moved floor/backdrop onto pool materials before this
+        # randomizer saved defaults).
+        import mujoco
+
+        rgba_changed = photo_swapped = 0
+        refl_vals = []
+        for gid, d in rnd._geom_id_to_defaults.items():
+            mid = d.get("mat_id", -1)
+            geom_moved = not np.allclose(model.geom_rgba[gid], d["geom_rgba"], atol=1e-6)
+            mat_moved = (
+                mid >= 0
+                and d.get("mat_rgba") is not None
+                and not np.allclose(model.mat_rgba[mid], d["mat_rgba"], atol=1e-6)
+            )
+            if geom_moved or mat_moved:
                 rgba_changed += 1
-            if int(model.geom_matid[gid]) != d["mat_id"]:
-                mat_swapped += 1
-        return rgba_changed, mat_swapped
+            cur_name = mujoco.mj_id2name(
+                model, mujoco.mjtObj.mjOBJ_MATERIAL, int(model.geom_matid[gid]))
+            if cur_name and cur_name.startswith("__TEXTURE_RANDOMIZER_MAT_"):
+                photo_swapped += 1
+            if mid >= 0:
+                refl_vals.append(float(model.mat_reflectance[mid]))
+        return rgba_changed, photo_swapped, refl_vals
 
     def snap():
         renderer, cam, _ = _diag_renderer(env)  # fresh renderer: re-upload textures
@@ -590,52 +691,49 @@ def demo_texture_randomization() -> None:
         renderer.close()
         return img
 
-    rnd.randomize(mj_data)  # one stock roll
-    n_stock, _ = roll_stats(rnd)
-    tiles.append((f"stock filter · {n_stock}/{len(all_named)} named geoms eligible (cup tint)", snap()))
-    print(f"[texture_randomization] {tiles[-1][0]}")
-
-    # back to authored, then relaxed-filter rolls
-    for gid, d in rnd._geom_id_to_defaults.items():
-        model.geom_rgba[gid] = d["geom_rgba"]
-
+    # successive randomize() calls are independent: each perturbs from the
+    # authored defaults saved at init, so no reset between rolls is needed.
     stats = []
-    for k in range(1, DR_TILES - 1):
-        rnd_all.randomize(mj_data)
-        rgba_changed, mat_swapped = roll_stats(rnd_all)
+    for k in range(1, DR_TILES):
+        rnd.randomize(mj_data)
+        rgba_changed, mat_swapped, refl_vals = roll_stats()
         stats.append((rgba_changed, mat_swapped))
-        tiles.append((f"relaxed roll {k} · {rgba_changed} rgba jittered · {mat_swapped} mat swaps", snap()))
+        rlo, rhi = (min(refl_vals), max(refl_vals)) if refl_vals else (0.0, 0.0)
+        tiles.append(
+            (f"roll {k} · {rgba_changed} re-colored · {mat_swapped} photo-swap · refl {rlo:.2f}-{rhi:.2f}", snap())
+        )
         print(f"[texture_randomization] {tiles[-1][0]}")
 
     media = "texture_randomization_grid.png"
     _tile_grid(
         tiles,
-        "Texture randomization — stock path is cup-tint-only in this scene; relaxed filter shows the mechanism",
+        "Texture & material randomization — DTD photos on floor, backdrop + cup body, "
+        "color/gloss rolls on boards, cubes (green|yellow) + cup",
         OUT / media,
     )
 
     rgba = [s[0] for s in stats]
-    swaps = [s[1] for s in stats]
+    total_swaps = sum(s[1] for s in stats)
+    n_dtd = len(dtd or [])
     _write_fragment(
         "texture_randomization",
         {
             "id": "texture_randomization",
             "group": "opt-in DR",
             "title": "Texture & material randomization (randomize_textures_all)",
-            "desc": "MEASURED: even flipped on, the stock path touches 1 of "
-            f"{len(all_named)} named geoms in this scene (cup_visual) — the "
-            "randomizer only admits named visual-only (contype==0) geoms, and "
-            "the floor/boards/cubes are collision geoms. The 'relaxed' tiles "
-            "subclass the randomizer to admit every named geom, showing the "
-            "actual mechanism: RGBA ±0.2 around authored values, "
-            "specular/shininess ±0.1, texture swaps from the model's own "
-            "pool. Same seed-5 layout in every tile. Off by default for "
-            "PiPER-X cubes-in-cup.",
+            "desc": "One roll does all of this at once. Surfaces with a texture "
+            f"— floor, backdrop wall and cup body — get a random photo from a "
+            f"{n_dtd}-image DTD subset (real messy surfaces, full hue range "
+            "incl. warm; dr_texture_paths). Flat-colored surfaces (boards, cup) "
+            "get rgba ±0.15 plus specular/shininess/reflectance jitter around "
+            "authored values. Cubes are categorical: each independently green "
+            "OR yellow per episode, gloss still jittering. Same seed-5 layout "
+            "in every tile. Off by default for PiPER-X cubes-in-cup.",
             "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py texture_randomization",
-            "metrics": f"stock: {n_stock}/{len(all_named)} named geoms eligible · "
-            f"relaxed ({len(stats)} rolls): {min(rgba)}-{max(rgba)} geoms "
-            f"rgba-jittered, {min(swaps)}-{max(swaps)} material swaps per roll · "
-            f"pool {len(rnd_all.texture_ids) or len(rnd_all.texture_bitmaps)} model textures",
+            "metrics": f"{len(eligible)} eligible visual geoms · {len(stats)} rolls: "
+            f"{min(rgba)}-{max(rgba)} materials re-colored per roll, "
+            f"{total_swaps} photo swaps (pool = {n_dtd} DTD images) · "
+            "cubes categorical green|yellow",
             "media": [{"type": "image", "file": media}],
         },
     )
@@ -1107,9 +1205,15 @@ def demo_offline_rerender() -> None:
     the script writes the manifest fragment itself (--fragment)."""
     for stale in OUT.glob("rerender_*"):  # traj index may differ between runs
         stale.unlink()
+    # pinned: this run's shortest successful episode is single-cube, so the
+    # frozen config covers the full layout and the A/B check is clean (the
+    # newest-run default may only have multi-cube successes — ghost cubes)
+    h5 = (REPO / "experiment_output/datagen/piper_x_cubes_in_cup_v1"
+          / "PiperXCubesInCupDataGenConfig/20260726_212737/house_0"
+          / "trajectories_batch_1_of_1.h5")
     r = subprocess.run(
         [sys.executable, str(REPO / "scripts/viz/piper_x_offline_rerender.py"),
-         "--draws", "3", "--fragment", "--out", str(OUT)],
+         "--h5", str(h5), "--draws", "3", "--fragment", "--out", str(OUT)],
         cwd=REPO,
         env={**os.environ, "VIEW": "0"},
     )
@@ -1145,6 +1249,7 @@ def main() -> int:
                 "task_sampling": demo_task_sampling,
                 "action_noise": demo_action_noise,
                 "camera_randomization": demo_camera_randomization,
+                "camera_noise": demo_camera_noise,
                 "lighting_randomization": demo_lighting_randomization,
                 "texture_randomization": demo_texture_randomization,
                 "dynamics_randomization": demo_dynamics_randomization,

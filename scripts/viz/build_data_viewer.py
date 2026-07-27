@@ -367,7 +367,10 @@ def main():
                     media.append({**m, "data": json.loads(src.read_text())})
                 else:
                     shutil.copy(src, assets / "demos" / m["file"])
-                    media.append({**m, "file": f"assets/demos/{m['file']}"})
+                    # mtime cache-buster: same filename across re-records, so
+                    # browsers would otherwise keep serving the stale image
+                    v = int(src.stat().st_mtime)
+                    media.append({**m, "file": f"assets/demos/{m['file']}?v={v}"})
             entry["media"] = media
             links = []
             for lk in d.get("links", []):

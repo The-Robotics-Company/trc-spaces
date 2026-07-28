@@ -35,6 +35,7 @@ import io
 import json
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import h5py
@@ -261,18 +262,33 @@ def format_sampling_groups(sampling: dict) -> list:
 
 def collect_episodes(data_root: Path):
     """Walk data_root for trajectories*.h5; yield one record per traj group."""
-    h5_paths = sorted(data_root.rglob("trajectories*.h5"))
+    # newest run first: a "run" is the dir two levels above the h5
+    # (<run>/house_*/trajectories*.h5), so episodes from the latest datagen show
+    # at the top when aggregating multiple runs under one root.
+    h5_paths = sorted(
+        data_root.rglob("trajectories*.h5"),
+        key=lambda p: (-p.parent.parent.stat().st_mtime, str(p)),
+    )
     if not h5_paths:
         sys.exit(f"[viewer] no trajectories*.h5 found under {data_root}")
     episodes = []
     for h5_path in h5_paths:
+        # run label = run dir relative to data_root (aggregating many runs);
+        # collapses to the dir name when data_root IS a single run dir.
+        run_dir = h5_path.parent.parent
+        try:
+            run_label = str(run_dir.relative_to(data_root))
+        except ValueError:
+            run_label = run_dir.name
+        if run_label in ("", "."):
+            run_label = data_root.name
         with h5py.File(h5_path, "r") as f:
             for key in natural_traj_order(f.keys()):
                 if not key.startswith("traj_"):
                     continue
                 g = f[key]
                 traj_idx = int(key.split("_")[-1])
-                rec = {"h5": h5_path, "traj": key}
+                rec = {"h5": h5_path, "traj": key, "run": run_label}
                 # per-timestep success flags; the episode verdict is the final one
                 succ = np.asarray(g["success"]) if "success" in g else np.zeros(1, bool)
                 rec["success"] = bool(succ[-1])
@@ -367,7 +383,14 @@ def jpeg_data_uri(img: np.ndarray, max_w=240, quality=78) -> str:
 
 def main():
     ap = argparse.ArgumentParser(description="Build the mlspaces datagen data viewer.")
-    ap.add_argument("data_root", help="Datagen output dir (searched recursively for h5s).")
+    ap.add_argument(
+        "data_root",
+        nargs="?",
+        default=str(REPO / "experiment_output" / "datagen"),
+        help="Datagen output dir, searched RECURSIVELY for h5s so every run under "
+        "it is aggregated into one gallery, newest run first "
+        "(default: %(default)s — i.e. all runs, no path needed).",
+    )
     ap.add_argument("--out", default=str(REPO / "results" / "data_viewer"))
     ap.add_argument("--title", default=None, help="Site title (default: data_root name).")
     ap.add_argument(
@@ -376,8 +399,47 @@ def main():
         help="Dir with manifest.json from scripts/viz/record_sampling_demos.py "
         "(adds the 'Sampling demos' section; silently skipped if missing).",
     )
+    ap.add_argument(
+        "--watch",
+        action="store_true",
+        help="After building, keep running and rebuild automatically whenever an h5 "
+        "under data_root is added or changes (auto-refresh; Ctrl-C to stop).",
+    )
     args = ap.parse_args()
 
+    build_site(args)
+    if args.watch:
+        _watch_and_rebuild(args)
+
+
+def _watch_and_rebuild(args) -> None:
+    """Poll for new/changed trajectories*.h5 and rebuild the site on any change."""
+    data_root = Path(args.data_root).resolve()
+
+    def snapshot() -> dict:
+        return {str(p): p.stat().st_mtime for p in data_root.rglob("trajectories*.h5")}
+
+    last = snapshot()
+    print(f"[viewer] watching {data_root} for new/changed runs (Ctrl-C to stop)")
+    try:
+        while True:
+            time.sleep(3)
+            cur = snapshot()
+            if cur != last:
+                n_new = len(set(cur) - set(last))
+                print(f"[viewer] change detected ({n_new} new h5) — rebuilding…")
+                last = cur
+                try:
+                    build_site(args)
+                except SystemExit as e:  # e.g. h5 still mid-write, or none found
+                    print(f"[viewer] rebuild skipped: {e}")
+                except Exception as e:  # noqa: BLE001
+                    print(f"[viewer] rebuild failed: {e}")
+    except KeyboardInterrupt:
+        print("\n[viewer] watch stopped")
+
+
+def build_site(args) -> None:
     data_root = Path(args.data_root).resolve()
     episodes = collect_episodes(data_root)
     print(f"[viewer] {len(episodes)} episodes from {data_root}")
@@ -458,6 +520,7 @@ def main():
             "task": rec["task_description"],
             "object": rec["object_name"],
             "reward": round(rec["reward_sum"], 3),
+            "run": rec["run"],
             "source": f"{rec['h5'].name}::{rec['traj']}",
         }
         html = (
@@ -480,6 +543,7 @@ def main():
                 "hover_cam": main_vid["cam"] if main_vid else "",
                 "subcams": subcams,
                 "task": rec["task_description"],
+                "run": rec["run"],
                 "ncams": len(rgb_vids),
                 "sampling": format_sampling_groups(rec.get("sampling", {})),
             }
@@ -815,6 +879,7 @@ html+=`<div class="pane"><h3>Episode</h3><div class="kv">`
   +`<b>steps</b><span>${d.steps}</span>`
   +`<b>reward Σ</b><span>${d.reward}</span>`
   +`<b>fps</b><span>${d.fps}</span>`
+  +(d.run?`<b>run</b><span>${d.run}</span>`:'')
   +`<b>source</b><span>${d.source}</span>`
   +`</div></div>`;
 grid.innerHTML=html;
@@ -844,6 +909,8 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   <div class="grp"><span class="muted">sort:</span>
     <select id="sort"><option value="ei">episode #</option>
       <option value="steps">length</option></select></div>
+  <div class="grp" id="rungrp" style="display:none"><span class="muted">run:</span>
+    <select id="runsel"><option value="all">all runs</option></select></div>
   <div class="grp muted" id="count"></div>
 </div>
 <div class="demos" id="demos" style="display:none">
@@ -861,7 +928,7 @@ document.getElementById('s_steps').textContent=STATS.total_steps.toLocaleString(
 
 // persisted gallery state (filters/sort/scroll survive visiting an episode)
 const STORE='mlspacesViewer.state.v1';
-let filt={res:'all'};let sort='ei';
+let filt={res:'all',run:'all'};let sort='ei';
 function readState(){try{return JSON.parse(sessionStorage.getItem(STORE)||'null');}catch(e){return null;}}
 (function(){const s=readState();if(s){if(s.filt)filt=Object.assign(filt,s.filt);if(s.sort)sort=s.sort;}})();
 function saveSel(){try{const c=readState()||{};
@@ -875,10 +942,22 @@ document.querySelectorAll('button.f').forEach(b=>b.onclick=()=>{
   document.querySelectorAll(`button.f[data-f="${b.dataset.f}"]`).forEach(x=>x.classList.remove('active'));
   b.classList.add('active');filt[b.dataset.f]=b.dataset.v;saveSel();render();});
 document.getElementById('sort').onchange=e=>{sort=e.target.value;saveSel();render();};
+// run filter: populated from the distinct runs aggregated under data_root
+// (already ordered newest-first server-side). Hidden when there's only one run.
+const RUNS=[...new Set(CARDS.map(c=>c.run).filter(Boolean))];
+const runsel=document.getElementById('runsel');
+if(runsel&&RUNS.length>1){
+  document.getElementById('rungrp').style.display='';
+  for(const r of RUNS){const o=document.createElement('option');o.value=r;o.textContent=r;runsel.appendChild(o);}
+  if(!RUNS.includes(filt.run))filt.run='all';
+  runsel.value=filt.run;
+  runsel.onchange=e=>{filt.run=e.target.value;saveSel();render();};
+}
 function syncControls(){
   document.querySelectorAll('button.f').forEach(b=>
     b.classList.toggle('active',String(filt[b.dataset.f])===String(b.dataset.v)));
   document.getElementById('sort').value=sort;
+  const rs=document.getElementById('runsel');if(rs)rs.value=filt.run;
 }
 
 function attachHover(cardEl,c){
@@ -906,7 +985,9 @@ function samplingHTML(groups){
 }
 
 function render(){
-  let rows=CARDS.filter(c=>filt.res==='all'||(filt.res==='ok')===(c.success===1));
+  let rows=CARDS.filter(c=>
+    (filt.res==='all'||(filt.res==='ok')===(c.success===1))
+    &&(filt.run==='all'||c.run===filt.run));
   rows.sort((a,b)=>sort==='ei'?a.ei-b.ei:b[sort]-a[sort]);
   document.getElementById('count').textContent=`${rows.length} shown`;
   const g=document.getElementById('grid');g.innerHTML='';
@@ -930,6 +1011,7 @@ function render(){
       `<div class="meta"><span class="id">episode ${c.ei}</span>`+
         `<span class="muted">${c.steps} steps</span></div>`+
       `<div class="chips">`+
+        (c.run?`<span class="chip" title="${esc(c.run)}">▷ ${esc(c.run)}</span>`:``)+
         (c.task?`<span class="chip" title="${c.task}">${c.task}</span>`:``)+
         `<span class="chip">${c.ncams} cam${c.ncams===1?'':'s'}</span></div>`+
       samplingHTML(c.sampling);

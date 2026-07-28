@@ -1041,7 +1041,7 @@ class PiperXCubesInCupDataGenConfig(PickAndPlaceDataGenConfig):
     """PiPER-X picks a cube and places it into the in-scene cup on the shelf."""
 
     scene_dataset: str = "user"
-    num_workers: int = 1
+    num_workers: int = 10
     seed: int | None = 0
     filter_for_successful_trajectories: bool = False
     use_passive_viewer: bool = False
@@ -1068,7 +1068,7 @@ class PiperXCubesInCupDataGenConfig(PickAndPlaceDataGenConfig):
         dataset_name="user",
         scene_xml_paths=[str(_SCENE_XML)],
         house_inds=None,  # -> pipeline uses range(len(scene_xml_paths)) = [0]
-        samples_per_house=4,
+        samples_per_house=600,
         house_variant="base",
         pickup_types=[],  # [] => match any typed object; cube filtered in by grasps
         grasp_libraries=[GRASP_LIBRARY],

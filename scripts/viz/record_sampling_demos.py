@@ -100,19 +100,19 @@ def _set_noise(exp_config, knobs) -> None:
 
 
 def _diag_renderer(env, w: int = 624, h: int = 352):
-    """(renderer, camera) for a diagnostic free-camera view of the workspace.
+    """(renderer, camera, mj_data) rendering from the scene's ACTUAL exo_camera.
 
-    The scene's own exo_camera sits on the base aimed at link3 — from there the
-    matte-black boards swallow the frame — so demo media renders from a fixed
-    external viewpoint where cubes, cup and arm are all legible instead.
+    Previously this used a fixed free-camera viewpoint. Demos now render from the
+    real world-fixed exo_camera (the diag view baked into the scene, carrying its
+    per-episode mount/FOV noise) so demo media matches what the dataset records.
     """
     import mujoco
 
     mj_data = env.mj_datas[env.current_batch_index]
     renderer = mujoco.Renderer(mj_data.model, h, w)
     cam = mujoco.MjvCamera()
-    cam.lookat[:] = (0.32, 0.0, 0.15)
-    cam.azimuth, cam.elevation, cam.distance = 160, -25, 1.0
+    cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+    cam.fixedcamid = mujoco.mj_name2id(mj_data.model, mujoco.mjtObj.mjOBJ_CAMERA, "exo_camera")
     return renderer, cam, mj_data
 
 

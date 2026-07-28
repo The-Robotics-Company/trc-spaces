@@ -126,6 +126,139 @@ def video_meta(path: Path):
         return None, 0, None
 
 
+def _fmt_num(x, nd=2):
+    try:
+        return f"{float(x):.{nd}f}"
+    except (TypeError, ValueError):
+        return str(x)
+
+
+def _deg(x, nd=1):
+    return _fmt_num(float(x) * 180.0 / np.pi, nd)
+
+
+def format_sampling_groups(sampling: dict) -> list:
+    """Turn the raw per-episode sampling record into ordered display groups
+    [{title, rows:[[label, value], ...]}] for the hover overlay. Unknown/extra
+    keys are still surfaced generically so nothing silently disappears."""
+    if not sampling:
+        return []
+    groups = []
+    seen = set()
+
+    # ---- Pose noise: base-pose + init-qpos shown together --------------------
+    bp = sampling.get("base_pose")
+    iq = sampling.get("init_qpos_noise")
+    pose_rows = []
+    if isinstance(bp, dict):
+        seen.add("base_pose")
+        off = bp.get("pos_offset") or [0, 0, 0]
+        pose_rows.append(["base Δpos (cm)", ", ".join(_fmt_num(v * 100, 1) for v in off)])
+        pose_rows.append(
+            ["base yaw (°)", _deg(bp.get("yaw", 0.0)) + ("" if bp.get("yaw_applied") else "  (off)")]
+        )
+    if isinstance(iq, dict):
+        seen.add("init_qpos_noise")
+        for grp, d in iq.items():
+            perturb = d.get("perturb") if isinstance(d, dict) else d
+            if isinstance(perturb, list):
+                pose_rows.append([f"init {grp} (rad)", ", ".join(_fmt_num(v, 3) for v in perturb)])
+    if pose_rows:
+        groups.append({"title": "Pose noise", "rows": pose_rows})
+
+    # ---- Objects -------------------------------------------------------------
+    ob = sampling.get("objects")
+    if isinstance(ob, dict):
+        seen.add("objects")
+        rows = []
+        if "n_cubes_placed" in ob or "n_cubes_requested" in ob:
+            rows.append(["cubes", f"{ob.get('n_cubes_placed', '?')} placed / {ob.get('n_cubes_requested', '?')} req"])
+        cup = ob.get("cup")
+        if isinstance(cup, dict) and cup.get("xy"):
+            rows.append(["cup xy", ", ".join(_fmt_num(v) for v in cup["xy"])])
+            rows.append(["cup yaw (°)", _deg(cup.get("yaw", 0.0), 0)])
+        for c in ob.get("cubes") or []:
+            xy = ", ".join(_fmt_num(v) for v in c.get("xy", []))
+            rows.append([c.get("name", "cube"), f"xy ({xy}), yaw {_deg(c.get('yaw', 0.0), 0)}°"])
+        groups.append({"title": "Objects", "rows": rows})
+
+    # ---- Textures (detailed: which geoms DTD / palette-colored / jittered) ----
+    tx = sampling.get("textures")
+    if isinstance(tx, dict):
+        seen.add("textures")
+        rows = [["mode", str(tx.get("mode", "?"))]]
+        palette = tx.get("palette") or []
+        if palette:
+            rows.append(["palette colors", f"{len(palette)} geom(s)"])
+            for name, rgb in palette:
+                rows.append([f"  {name}", ", ".join(_fmt_num(v, 2) for v in rgb)])
+        dtd = tx.get("dtd") or []
+        if dtd:
+            rows.append(["DTD photos", f"{len(dtd)} geom(s)"])
+            for name, tex in dtd:
+                rows.append([f"  {name}", tex])
+        other = tx.get("other_tex") or []
+        if other:
+            rows.append(["model/category tex", f"{len(other)} geom(s)"])
+            for name, kind in other:
+                rows.append([f"  {name}", kind])
+        jitter = tx.get("rgba_jitter") or []
+        if jitter:
+            rows.append(["rgba jitter", f"{len(jitter)} geom(s)"])
+            for name in jitter:
+                rows.append([f"  {name}", "jittered"])
+        groups.append({"title": "Textures", "rows": rows})
+
+    # ---- Camera: per-episode sampled viewpoint / FOV / mount noise -----------
+    cam = sampling.get("camera")
+    if isinstance(cam, dict):
+        seen.add("camera")
+        rows = []
+        for cname, cd in cam.items():
+            if not isinstance(cd, dict):
+                continue
+            if cd.get("type") == "randomized_exo":
+                rows.append([cname, f"dist {_fmt_num(cd.get('distance_m', 0), 2)} m, az {_fmt_num(cd.get('azimuth_deg', 0), 0)}°"])
+                rows.append([f"  {cname}", f"h {_fmt_num(cd.get('height_m', 0), 2)} m, fov {_fmt_num(cd.get('fov_deg', 0), 0)}°"])
+            else:
+                md = cd.get("mount_delta_cm") or []
+                rows.append([cname, f"fov {_fmt_num(cd.get('fov_deg', 0), 0)}°"])
+                if md:
+                    rows.append([f"  {cname} mount (cm)", ", ".join(_fmt_num(v, 1) for v in md)])
+        if rows:
+            groups.append({"title": "Camera", "rows": rows})
+
+    # ---- Lighting / dynamics (booleans) -------------------------------------
+    dr = sampling.get("domain_randomization")
+    if isinstance(dr, dict):
+        seen.add("domain_randomization")
+        rows = [["lighting", "on" if dr.get("lighting") else "off"],
+                ["dynamics", "on" if dr.get("dynamics") else "off"]]
+        if "textures" not in sampling:   # no detailed section -> show the mode here
+            rows.insert(1, ["textures", str(dr.get("textures", "off"))])
+        groups.append({"title": "Lighting / dynamics", "rows": rows})
+
+    # ---- Action noise --------------------------------------------------------
+    an = sampling.get("action_noise")
+    if isinstance(an, dict):
+        seen.add("action_noise")
+        if an.get("enabled"):
+            rows = [["status", "on"],
+                    ["arm scale", _fmt_num(an.get("arm_scale", 0), 2)],
+                    ["max Δpos (cm)", _fmt_num(float(an.get("max_tcp_pos_m") or 0) * 100, 1)],
+                    ["max Δrot (°)", _deg(an.get("max_tcp_rot_rad") or 0, 1)]]
+        else:
+            rows = [["status", "off"]]
+        groups.append({"title": "Action noise", "rows": rows})
+
+    # surface any other sections generically so the view stays complete
+    for k, v in sampling.items():
+        if k in seen:
+            continue
+        groups.append({"title": k, "rows": [["", json.dumps(v, default=str)]]})
+    return groups
+
+
 def collect_episodes(data_root: Path):
     """Walk data_root for trajectories*.h5; yield one record per traj group."""
     h5_paths = sorted(data_root.rglob("trajectories*.h5"))
@@ -199,6 +332,16 @@ def collect_episodes(data_root: Path):
                     else:
                         cam = cam[: -len(".mp4")]
                     rec["videos"][cam] = mp4
+                # ---- per-episode sampling-choice sidecar -------------------
+                # episode_{idx:08d}_sampling{suffix}.json written by the datagen
+                # pipeline alongside the MP4s. Absent for older runs -> {}.
+                rec["sampling"] = {}
+                sidecar = h5_path.parent / f"{prefix}sampling{suffix}.json"
+                if sidecar.exists():
+                    try:
+                        rec["sampling"] = json.loads(sidecar.read_text()).get("sampling", {}) or {}
+                    except Exception as e:
+                        print(f"[viewer] bad sampling sidecar {sidecar.name}: {e}")
                 episodes.append(rec)
     return episodes
 
@@ -275,12 +418,17 @@ def main():
             )
             if not thumb and not cam.endswith("_depth") and mid is not None:
                 thumb = jpeg_data_uri(mid)
-        # prefer an exo camera as thumb/hover source if present
+        # prefer an exo camera as thumb/hover source if present; the remaining
+        # RGB cameras (e.g. wrist) become secondary hover videos shown under it.
         rgb_vids = [v for v in vids if not v["depth"]]
-        hover = next(
-            (v["file"] for v in rgb_vids if "exo" in v["cam"]),
-            rgb_vids[0]["file"] if rgb_vids else "",
+        main_vid = next(
+            (v for v in rgb_vids if "exo" in v["cam"]),
+            rgb_vids[0] if rgb_vids else None,
         )
+        hover = main_vid["file"] if main_vid else ""
+        subcams = [
+            {"cam": v["cam"], "file": v["file"]} for v in rgb_vids if v is not main_vid
+        ]
 
         # ---- per-episode inline data ----------------------------------------
         series = {}  # name -> {b64, dim, n}
@@ -329,8 +477,11 @@ def main():
                 "steps": rec["steps"],
                 "thumb": thumb,
                 "hover": hover,
+                "hover_cam": main_vid["cam"] if main_vid else "",
+                "subcams": subcams,
                 "task": rec["task_description"],
                 "ncams": len(rgb_vids),
+                "sampling": format_sampling_groups(rec.get("sampling", {})),
             }
         )
         print(
@@ -443,6 +594,36 @@ button.f.active{background:var(--accent);color:#04121f;border-color:var(--accent
 .chip{font-size:11px;background:var(--chip);color:var(--muted);border-radius:6px;padding:2px 7px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 .corner{position:absolute;top:7px;left:7px}
+
+/* per-episode sampling-choice panel: sits BELOW the video and expands on
+   hover so it never covers the frame. */
+.card .sampling{max-height:0;overflow:hidden;opacity:0;color:var(--fg);
+  background:var(--panel2);border-top:1px solid transparent;
+  font-size:10.5px;line-height:1.4;padding:0 11px;
+  transition:max-height .16s ease,opacity .12s,padding .16s}
+.card:hover .sampling{max-height:230px;overflow-y:auto;opacity:1;
+  padding:9px 11px;border-top-color:var(--line)}
+.card .sampling.empty{display:none}
+.card .sampling .sgrp{margin-bottom:7px}
+.card .sampling .sgrp>b{display:block;color:var(--accent);font-size:9.5px;
+  text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px}
+.card .sampling .srow{display:flex;justify-content:space-between;gap:8px}
+.card .sampling .srow>span:first-child{color:var(--muted);white-space:nowrap}
+.card .sampling .srow>span:last-child{text-align:right;font-variant-numeric:tabular-nums;
+  word-break:break-word}
+.card .sinfo{position:absolute;top:7px;right:7px;background:rgba(0,0,0,.55);color:#fff;
+  font-size:10px;padding:2px 7px;border-radius:10px;pointer-events:none;transition:opacity .12s}
+.card:hover .sinfo{opacity:0}
+
+/* secondary camera views (e.g. wrist): hidden until hover, then revealed in a
+   strip directly under the main exo video so nothing overlaps it. */
+.card .subcams{display:flex;gap:2px;max-height:0;overflow:hidden;opacity:0;
+  background:#0a0c10;transition:max-height .16s ease,opacity .12s}
+.card:hover .subcams{max-height:150px;opacity:1}
+.card .subcams .sub{position:relative;flex:1 1 0;aspect-ratio:16/9;min-width:0;background:#0a0c10}
+.card .subcams .sub video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
+.card .subcams .clabel{position:absolute;bottom:3px;left:4px;background:rgba(0,0,0,.6);color:#fff;
+  font-size:9px;padding:1px 6px;border-radius:8px;pointer-events:none}
 
 /* sampling demos section */
 .demos{padding:18px 24px;border-bottom:1px solid var(--line);background:var(--panel2)}
@@ -701,13 +882,27 @@ function syncControls(){
 }
 
 function attachHover(cardEl,c){
-  if(!c.hover)return;
-  const v=cardEl.querySelector('video');if(!v)return;
+  // play the main (exo) video AND every secondary camera view together on hover
+  const vids=cardEl.querySelectorAll('video');
+  if(!vids.length)return;
   cardEl.addEventListener('mouseenter',()=>{
-    if(!v.src)v.src=c.hover;      // lazy: only load on first hover
-    v.currentTime=0;v.play().catch(()=>{});
+    vids.forEach(v=>{
+      if(!v.src&&v.dataset.src)v.src=v.dataset.src;   // lazy: load on first hover
+      v.currentTime=0;v.play().catch(()=>{});
+    });
   });
-  cardEl.addEventListener('mouseleave',()=>{v.pause();});
+  cardEl.addEventListener('mouseleave',()=>{vids.forEach(v=>{v.pause();});});
+}
+
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function samplingHTML(groups){
+  if(!groups||!groups.length)return `<div class="sampling empty"></div>`;
+  const body=groups.map(gp=>
+    `<div class="sgrp"><b>${esc(gp.title)}</b>`+
+    (gp.rows||[]).map(r=>
+      `<div class="srow"><span>${esc(r[0])}</span><span>${esc(r[1])}</span></div>`).join('')+
+    `</div>`).join('');
+  return `<div class="sampling">${body}</div>`;
 }
 
 function render(){
@@ -718,18 +913,26 @@ function render(){
   rows.forEach(c=>{
     const a=document.createElement('a');a.className='card';
     a.href=`episodes/ep_${String(c.ei).padStart(4,'0')}.html`;
+    const hasSampling=c.sampling&&c.sampling.length;
     a.innerHTML=
       `<div class="thumbwrap">`+
         `<span class="badge ${c.success?'ok':'fail'} corner">${c.success?'OK':'FAIL'}</span>`+
         (c.thumb?`<img src="${c.thumb}" loading="lazy">`
                 :`<div style="display:flex;height:100%;align-items:center;justify-content:center" class="muted">no rgb</div>`)+
-        (c.hover?`<video muted loop playsinline preload="none"></video><span class="play">▶ hover</span>`:``)+
+        (c.hover?`<video muted loop playsinline preload="none" data-src="${c.hover}"></video><span class="play">▶ hover</span>`:``)+
+        (hasSampling?`<span class="sinfo">ℹ sampling</span>`:``)+
       `</div>`+
+      (c.subcams&&c.subcams.length?`<div class="subcams">`+
+        c.subcams.map(s=>
+          `<div class="sub"><video muted loop playsinline preload="none" data-src="${s.file}"></video>`+
+          `<span class="clabel">${esc(s.cam)}</span></div>`).join('')+
+      `</div>`:``)+
       `<div class="meta"><span class="id">episode ${c.ei}</span>`+
         `<span class="muted">${c.steps} steps</span></div>`+
       `<div class="chips">`+
         (c.task?`<span class="chip" title="${c.task}">${c.task}</span>`:``)+
-        `<span class="chip">${c.ncams} cam${c.ncams===1?'':'s'}</span></div>`;
+        `<span class="chip">${c.ncams} cam${c.ncams===1?'':'s'}</span></div>`+
+      samplingHTML(c.sampling);
     g.appendChild(a);
     attachHover(a,c);
   });

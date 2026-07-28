@@ -1,4 +1,5 @@
 import json
+import os
 
 import mujoco
 import numpy as np
@@ -229,6 +230,7 @@ class TextureRandomizer:
         shininess_perturbation_size: float = 0.1,
         reflectance_perturbation_size: float = 0.1,
         categorical_geom_rgba: dict | None = None,
+        categorical_rgba_jitter: float = 0.0,
     ):
         self.model = model
         self.scene_metadata = scene_metadata
@@ -298,6 +300,13 @@ class TextureRandomizer:
         self.shininess_perturbation_size = shininess_perturbation_size
         self.reflectance_perturbation_size = reflectance_perturbation_size
         self.categorical_geom_rgba = categorical_geom_rgba or {}
+        self.categorical_rgba_jitter = categorical_rgba_jitter
+
+        # Optional per-episode choice log (None = disabled). When active, the
+        # apply-methods append the concrete per-geom decision (DTD photo, palette
+        # color, or continuous rgba jitter) for provenance/visualization. Reading
+        # already-drawn values only — never changes the RNG order or behavior.
+        self._choice_log: dict | None = None
 
         # Load texture files if provided, or extract existing textures from model (default)
         self.texture_bitmaps: list[np.ndarray] = []
@@ -1020,6 +1029,16 @@ class TextureRandomizer:
 
         return texture_applied, color_applied
 
+    def begin_choice_log(self) -> None:
+        """Start recording per-geom randomization choices for one episode."""
+        self._choice_log = {"dtd": [], "palette": [], "rgba_jitter": [], "other_tex": []}
+
+    def pop_choice_log(self) -> dict:
+        """Return the accumulated per-geom choices and stop recording."""
+        cl = self._choice_log or {}
+        self._choice_log = None
+        return cl
+
     def randomize_by_category(self, data: MjData | None = None):
         """
         Randomize textures and colors by category.
@@ -1232,7 +1251,16 @@ class TextureRandomizer:
         for key, palette in self.categorical_geom_rgba.items():
             if key in name and palette:
                 idx = int(self.random_state.randint(len(palette)))
-                return np.asarray(palette[idx], dtype=float)
+                rgba = np.asarray(palette[idx], dtype=float).copy()
+                # Jitter around the palette pick so matched geoms (e.g. cubes)
+                # get varied shades of the chosen colour rather than one exact
+                # value, while staying recognizably that colour. 0.0 = off.
+                if self.categorical_rgba_jitter > 0.0:
+                    j = self.categorical_rgba_jitter
+                    rgba[:3] = np.clip(
+                        rgba[:3] + self.random_state.uniform(-j, j, size=3), 0.0, 1.0
+                    )
+                return rgba
         return None
 
     def _randomize_colors_and_materials(self, name: str, geom_id: int, mat_id: int) -> None:
@@ -1246,6 +1274,12 @@ class TextureRandomizer:
         elif cat is None and self.randomize_geom_rgba:
             self._randomize_geom_rgba_direct(geom_id)
         self._randomize_material_attributes(geom_id, mat_id, categorical_rgba=cat)
+        if self._choice_log is not None:
+            if cat is not None:
+                rgb = [round(float(x), 3) for x in np.asarray(cat).ravel()[:3]]
+                self._choice_log["palette"].append([name, rgb])
+            else:
+                self._choice_log["rgba_jitter"].append(name)
 
     def _randomize_geom_rgba_direct(self, geom_id: int):
         """Randomize geom RGBA color using direct geom_id (faster). Preserves alpha channel."""
@@ -1837,6 +1871,8 @@ class TextureRandomizer:
                 available_ids = self.texture_ids
 
             source_tex_id = available_ids[self.random_state.randint(len(available_ids))]
+            if self._choice_log is not None:
+                self._choice_log["other_tex"].append([name, "model_tex"])
 
             # Extract bitmap on-demand with caching
             try:
@@ -1844,10 +1880,23 @@ class TextureRandomizer:
             except Exception:
                 return  # Skip if extraction fails
         else:
-            # Randomly select from already loaded textures
-            selected_texture = available_textures[
-                self.random_state.randint(len(available_textures))
-            ]
+            # Randomly select from already loaded textures (single draw, captured)
+            sel_idx = self.random_state.randint(len(available_textures))
+            selected_texture = available_textures[sel_idx]
+            if self._choice_log is not None:
+                # indices [0, n_dtd) map to the external DTD photos (texture_paths);
+                # the rest come from the category-texture cache.
+                n_dtd = (
+                    len(self.texture_bitmaps)
+                    if (self.texture_paths and self.texture_bitmaps)
+                    else 0
+                )
+                if sel_idx < n_dtd and sel_idx < len(self.texture_paths or []):
+                    self._choice_log["dtd"].append(
+                        [name, os.path.basename(str(self.texture_paths[sel_idx]))]
+                    )
+                else:
+                    self._choice_log["other_tex"].append([name, "category_tex"])
 
         # Apply the selected texture to the target
         success = self._set_texture_bitmap_by_id(geom_id, selected_texture)

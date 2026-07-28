@@ -110,11 +110,16 @@ _EXO_CAM_NOISE = dict(
 
 
 class PiperXCubesInCupCameraSystem(PiperXCameraSystem):
-    """Same wrist cam, but the exo camera is the WORLD-fixed scene-level one
-    (asset_library/cubes_in_cup_scene.xml), not the base-mounted copy inside
-    piper_x.xml — the base pose is randomized per episode and the diag view
-    must not move with it. Both cameras get per-episode mount + FOV noise."""
+    """Wrist cam (mount/FOV jitter) + a fully RANDOMIZED exocentric camera.
 
+    The exo is re-placed every episode by spherical sampling around the
+    workspace center (beyond the upper board, facing back at the shelf + arm),
+    not the fixed world-fixed diag camera — that barely moved and gave no
+    third-person viewpoint diversity. Poses where the cubes/cup/gripper aren't
+    on screen are rejected by the segmentation visibility check and re-sampled.
+    Params mirror the tuned PiperXBehindBoardRandomCamSystem for this scene."""
+
+    img_resolution: tuple[int, int] = (624, 352)
     cameras: list[AllCameraTypes] = [
         MjcfCameraConfig(
             name="wrist_camera",
@@ -122,10 +127,19 @@ class PiperXCubesInCupCameraSystem(PiperXCameraSystem):
             robot_namespace="robot_0/",
             **_WRIST_CAM_NOISE,
         ),
-        MjcfCameraConfig(
+        RandomizedExocentricCameraConfig(
             name="exo_camera",
-            mjcf_name="exo_camera",  # scene-level, no robot namespace
-            **_EXO_CAM_NOISE,
+            distance_range=(0.5, 0.9),
+            height_range=(0.15, 0.55),
+            azimuth_range=(-np.pi / 4, np.pi / 4),
+            fov_range=(55.0, 80.0),
+            lookat_noise_range=(-0.05, 0.05),
+            visibility_constraints={
+                "__task_objects__": 0.0001,
+                "__gripper__": 0.0001,
+            },
+            max_placement_attempts=50,
+            allow_relaxed_constraints=True,
         ),
     ]
 
@@ -219,6 +233,12 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
         PickAndPlaceTask, which would bypass the multi-cube success judge
         (PiperXCubesInCupTask)."""
         self._configure_pick_and_place(env)
+        # No instruction sampling: we don't train on language for now. Override
+        # the CLIP-softmax referral expressions with a fixed, deterministic
+        # instruction so task_description is constant across episodes.
+        self.config.task_config.referral_expressions = {
+            "pickup_name": "cube", "place_name": "cup",
+        }
         return self.config.task_config.task_cls(env, self.config)
 
     def _sample_cup_xy(self) -> np.ndarray:
@@ -249,6 +269,7 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
         lane_half = self.CUP_RADIUS + self.CUP_LANE_CLEAR
         placed_xy: list[np.ndarray] = []
         active: list[str] = []
+        placements: list[dict] = []
         for i, name in enumerate(self.CUBE_NAMES):
             body = create_mlspaces_body(env.current_data, name)
             if len(active) < n_cubes:
@@ -258,14 +279,16 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
                         continue
                     if any(np.linalg.norm(xy - p) < self.MIN_CUBE_CUBE for p in placed_xy):
                         continue
-                    body.pose = self._pose(xy[0], xy[1], self.CUBE_Z,
-                                           yaw=np.random.uniform(-np.pi, np.pi))
+                    yaw = np.random.uniform(-np.pi, np.pi)
+                    body.pose = self._pose(xy[0], xy[1], self.CUBE_Z, yaw=yaw)
                     placed_xy.append(xy)
                     active.append(name)
+                    placements.append({"name": name, "xy": xy, "yaw": yaw})
                     break
             if name not in active:
                 px, py = self._PARK_XY[i]
                 body.pose = self._pose(px, py, self._PARK_Z, yaw=0.0)
+        self.record_sampling("objects", cubes=placements)
         return active
 
     def _sample_and_place_robot(self, env: CPUMujocoEnv) -> None:
@@ -282,20 +305,30 @@ class PiperXCubesInCupTaskSampler(PickAndPlaceTaskSampler):
         # frame per solve), and the exo camera is scene-level, so neither
         # depends on where the base lands.
         offset = np.random.uniform(-self.BASE_POS_NOISE, self.BASE_POS_NOISE, size=3)
-        yaw = (np.random.uniform(-self.BASE_YAW_NOISE, self.BASE_YAW_NOISE)
-               if np.random.random() < self.BASE_YAW_PROB else 0.0)
+        yaw_applied = np.random.random() < self.BASE_YAW_PROB
+        yaw = np.random.uniform(-self.BASE_YAW_NOISE, self.BASE_YAW_NOISE) if yaw_applied else 0.0
         robot_view.base.pose = self._pose(*offset, yaw=yaw)
         self._base_xy = offset[:2]  # cube/cup reach is measured from here
         task_cfg.robot_base_pose = pose_mat_to_7d(robot_view.base.pose).tolist()
+        self.record_sampling(
+            "base_pose", pos_offset=offset, yaw=yaw, yaw_applied=bool(yaw_applied)
+        )
 
-        n_cubes = int(np.random.randint(1, len(self.CUBE_NAMES) + 1))
+        n_cubes = int(np.random.randint(1, 4))  # 1-3 cubes (4th stays parked)
         cup = create_mlspaces_body(env.current_data, self.place_receptacle_name)
 
         # cup first; the lane rule always leaves feasible cube space on the board
         cup_xy = self._sample_cup_xy()
-        cup.pose = self._pose(cup_xy[0], cup_xy[1], self.CUP_Z,
-                              yaw=np.random.uniform(-np.pi, np.pi))
+        cup_yaw = np.random.uniform(-np.pi, np.pi)
+        cup.pose = self._pose(cup_xy[0], cup_xy[1], self.CUP_Z, yaw=cup_yaw)
         active = self._try_place_cubes(env, cup_xy, n_cubes)
+        self.record_sampling(
+            "objects",
+            n_cubes_requested=n_cubes,
+            n_cubes_placed=len(active),
+            cube_names=active,
+            cup={"xy": cup_xy, "yaw": cup_yaw},
+        )
         if len(active) < n_cubes:
             log.info(f"placed {len(active)}/{n_cubes} cubes (region too crowded)")
 
@@ -1022,7 +1055,12 @@ class PiperXCubesInCupDataGenConfig(PickAndPlaceDataGenConfig):
     task_config: PickAndPlaceTaskConfig = PickAndPlaceTaskConfig(task_cls=PiperXCubesInCupTask)
 
     # Fixed-base tabletop: no 0.7 m pedestal (arm base at z=0, matching board1 top).
-    robot_config: PiperXRobotConfig = PiperXRobotConfig(base_size=None)
+    # init_qpos_noise_range: per-episode graduated joint perturbation (rad),
+    # distal joints move more; applied in pick_task_sampler.randomize_scene.
+    robot_config: PiperXRobotConfig = PiperXRobotConfig(
+        base_size=None,
+        init_qpos_noise_range={"arm": [0.03, 0.03, 0.05, 0.08, 0.08, 0.10]},
+    )
     camera_config: PiperXCubesInCupCameraSystem = PiperXCubesInCupCameraSystem()
 
     task_sampler_config: PickAndPlaceTaskSamplerConfig = PickAndPlaceTaskSamplerConfig(
@@ -1036,9 +1074,22 @@ class PiperXCubesInCupDataGenConfig(PickAndPlaceDataGenConfig):
         grasp_libraries=[GRASP_LIBRARY],
         filter_for_grasps=True,  # excludes the grasp-less cup from pickup candidates
         check_robot_placement_visibility=False,  # we don't drive the robot around
-        randomize_textures=False,
+        randomize_textures=True,  # bakes the empty-material pool at compile
+        # full randomize() — the custom scene has NO THOR categories, so the
+        # category path (randomize_textures alone) randomizes NOTHING. This is
+        # what actually recolors boards/cup, DTD-swaps floor/backdrop/cup body,
+        # and applies the green/yellow cube palette.
+        randomize_textures_all=True,
+        randomize_lighting=True,
+        randomize_dynamics=True,  # ±20% friction/mass, robot links included
         # cubes are re-coloured green|yellow (per-cube) when texture DR is on
         categorical_geom_rgba=CUBE_COLOR_PALETTE,
+        # ±0.06 jitter around each palette pick so cubes get varied shades of
+        # green/yellow (like the boards' rgba jitter), not one exact value
+        categorical_rgba_jitter=0.06,
+        # stronger specular/shininess/reflectance jitter (0.4, matching the HTML
+        # texture demo) instead of the framework default 0.1
+        material_gloss_perturbation_size=0.4,
         # floor, backdrop + cup body get a random DTD photo per roll when texture DR is on
         dr_texture_paths=_dtd_texture_paths(),
     )

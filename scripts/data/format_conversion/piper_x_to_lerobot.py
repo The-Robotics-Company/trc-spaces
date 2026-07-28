@@ -59,6 +59,9 @@ def parse_args():
     ap.add_argument("--repo-id", default="local/piper_x_cubes")
     ap.add_argument("--root", type=Path, default=None, help="Output root (defaults to $HF_LEROBOT_HOME/<repo_id>)")
     ap.add_argument("--max-episodes", type=int, default=None, help="Limit episodes for quick tests")
+    ap.add_argument("--successful-only", action="store_true",
+                    help="Skip episodes whose final-step success flag is False "
+                         "(train on successes; the raw h5 keeps failures for study).")
     ap.add_argument("--image-writer-processes", type=int, default=2)
     ap.add_argument("--image-writer-threads", type=int, default=8)
     return ap.parse_args()
@@ -149,8 +152,8 @@ def read_policy_fps(h5_path: Path, traj_key: str) -> int:
 
 
 def convert_episode(dataset: LeRobotDataset, h5_path: Path, traj_key: str,
-                    traj_order: int, traj_len: int) -> int:
-    """Return number of frames written, or 0 if skipped."""
+                    traj_order: int, traj_len: int, successful_only: bool = False) -> int:
+    """Return number of frames written, 0 if skipped, -1 if filtered as failed."""
     # Drop dummy first action, done sentinel last action, and last 2 states
     # (per https://github.com/allenai/molmospaces/blob/main/docs/data_format.md)
     effective = traj_len - 2
@@ -159,6 +162,11 @@ def convert_episode(dataset: LeRobotDataset, h5_path: Path, traj_key: str,
 
     with h5py.File(h5_path, "r") as f:
         tg = f[traj_key]
+        if successful_only:
+            # episode success = success flag at the last effective step (latched
+            # once all shelf cubes are in the cup); failures kept in the h5 only.
+            if not bool(np.asarray(tg["success"])[effective - 1]):
+                return -1
         task: str = decode_json_bytes(tg["obs_scene"][()])["task_description"]
 
         qpos = [decode_json_bytes(tg["obs/agent/qpos"][i]) for i in range(effective)]
@@ -245,10 +253,14 @@ def main():
 
     total_frames = 0
     skipped = 0
+    filtered = 0
     for h5_path, traj_key, traj_order, traj_len in tqdm(trajs, desc="episodes"):
         try:
-            n = convert_episode(dataset, h5_path, traj_key, traj_order, traj_len)
-            if n == 0:
+            n = convert_episode(dataset, h5_path, traj_key, traj_order, traj_len,
+                                successful_only=args.successful_only)
+            if n == -1:
+                filtered += 1
+            elif n == 0:
                 skipped += 1
             else:
                 total_frames += n
@@ -258,7 +270,9 @@ def main():
 
     write_modality_json(dataset.root)
 
-    print(f"\nDone. {total_frames} frames across {len(trajs) - skipped} episodes ({skipped} skipped).")
+    kept = len(trajs) - skipped - filtered
+    print(f"\nDone. {total_frames} frames across {kept} episodes "
+          f"({filtered} filtered as failed, {skipped} skipped).")
     print(f"Dataset at: {dataset.root}")
 
 

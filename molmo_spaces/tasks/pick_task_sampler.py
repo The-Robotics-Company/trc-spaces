@@ -233,6 +233,9 @@ class PickTaskSampler(BaseMujocoTaskSampler):
             ):
                 noise_mag = np.array(self.config.robot_config.init_qpos_noise_range[group_name])
                 perturb = np.random.uniform(-noise_mag, noise_mag)
+                self.record_sampling(
+                    "init_qpos_noise", **{group_name: {"range": noise_mag, "perturb": perturb}}
+                )
             else:
                 perturb = np.zeros_like(qpos)
             robot_view.get_move_group(group_name).joint_pos = qpos + perturb

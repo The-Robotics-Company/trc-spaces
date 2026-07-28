@@ -266,6 +266,41 @@ class CameraManager:
     def __init__(self) -> None:
         """Initialize the camera manager with an empty registry."""
         self.registry: CameraRegistry = CameraRegistry()
+        # Optional per-episode choice log (None = disabled). When active, the
+        # camera-setup methods record the concrete sampled viewpoint/FOV/mount
+        # noise for provenance/visualization. Read-only: never adds RNG draws.
+        self._choice_log: dict | None = None
+
+    def begin_choice_log(self) -> None:
+        """Start recording per-episode camera draws for one episode."""
+        self._choice_log = {"cameras": {}}
+
+    def pop_choice_log(self) -> dict:
+        """Return the accumulated camera choices and stop recording."""
+        cl = self._choice_log or {}
+        self._choice_log = None
+        return cl
+
+    def _log_exo_choice(self, name, distance, azimuth, height, fov, pos) -> None:
+        if self._choice_log is None:
+            return
+        self._choice_log["cameras"][name] = {
+            "type": "randomized_exo",
+            "distance_m": float(distance),
+            "azimuth_deg": float(np.degrees(azimuth)),
+            "height_m": float(height),
+            "fov_deg": float(fov),
+            "world_pos": [float(x) for x in np.asarray(pos).ravel()[:3]],
+        }
+
+    def _log_mjcf_choice(self, name, fov, pos_delta) -> None:
+        if self._choice_log is None:
+            return
+        self._choice_log["cameras"][name] = {
+            "type": "mjcf_mounted",
+            "fov_deg": float(fov),
+            "mount_delta_cm": [float(x * 100.0) for x in np.asarray(pos_delta).ravel()[:3]],
+        }
 
     def setup_cameras(
         self,
@@ -411,9 +446,11 @@ class CameraManager:
             camera_config.fov if camera_config.fov is not None else camera_obj.fovy[0]
         )  # this will raise an error if the fov is not set - desired behavior
 
+        base_pos = camera_pos.copy()
         camera_pos, camera_quat, camera_fov = self.apply_mjcf_camera_noise(
             camera_pos, camera_quat, camera_fov, camera_config
         )
+        self._log_mjcf_choice(camera_config.name, camera_fov, camera_pos - base_pos)
 
         # Set up as robot-mounted camera (will track the body it's attached to)
         camera_obj_bodyid = camera_obj.bodyid.item()
@@ -581,6 +618,7 @@ class CameraManager:
 
         # Sample camera position
         best_pos, best_forward, best_up = None, None, None
+        best_dah = (None, None, None)  # distance/azimuth/height of best attempt
         best_visibility_score = -1.0
 
         for attempt in range(camera_config.max_placement_attempts):
@@ -643,6 +681,7 @@ class CameraManager:
                     log.debug(
                         f"[CAMERA SETUP] No valid visibility constraints for '{camera_config.name}', placing camera without visibility check"
                     )
+                    self._log_exo_choice(camera_config.name, distance, azimuth, height, camera_fov, pos)
                     self.add_camera(camera_config.name, pos, forward, up, camera_fov)
                     log.info(
                         f"[CAMERA SETUP] Set up randomized exocentric camera '{camera_config.name}' (no visibility constraints)"
@@ -677,12 +716,14 @@ class CameraManager:
                     if avg_visibility > best_visibility_score:
                         best_visibility_score = avg_visibility
                         best_pos, best_forward, best_up = pos, forward, up
+                        best_dah = (distance, azimuth, height)
 
                     # Remove temporary camera
                     del self.registry.cameras[f"_temp_{camera_config.name}"]
 
                     if constraints_met:
                         # Found a valid placement
+                        self._log_exo_choice(camera_config.name, distance, azimuth, height, camera_fov, pos)
                         self.add_camera(camera_config.name, pos, forward, up, camera_fov)
                         log.info(
                             f"[CAMERA SETUP] Set up randomized exocentric camera '{camera_config.name}' "
@@ -697,6 +738,7 @@ class CameraManager:
                     log.debug(f"[CAMERA SETUP] Visibility check failed: {e}")
             else:
                 # No visibility constraints - use first sample
+                self._log_exo_choice(camera_config.name, distance, azimuth, height, camera_fov, pos)
                 self.add_camera(camera_config.name, pos, forward, up, camera_fov)
                 log.info(
                     f"[CAMERA SETUP] Set up randomized exocentric camera '{camera_config.name}' (no constraints)"
@@ -705,6 +747,7 @@ class CameraManager:
 
         # Failed to meet constraints - use best attempt if allowed
         if camera_config.allow_relaxed_constraints and best_pos is not None:
+            self._log_exo_choice(camera_config.name, *best_dah, camera_fov, best_pos)
             self.add_camera(camera_config.name, best_pos, best_forward, best_up, camera_fov)
             log.warning(
                 f"[CAMERA SETUP] Set up exocentric camera '{camera_config.name}' with relaxed constraints "

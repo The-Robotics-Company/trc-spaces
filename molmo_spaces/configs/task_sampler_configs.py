@@ -31,6 +31,14 @@ class BaseMujocoTaskSamplerConfig(Config):
     # per roll (instead of continuous rgba jitter); gloss still jitters. E.g.
     # {"cube_visual": [green, yellow]} forces cubes to be only green or yellow.
     categorical_geom_rgba: dict | None = None
+    # Uniform ± jitter added to a categorical_geom_rgba palette pick so matched
+    # geoms (e.g. cubes) get varied shades of the chosen colour, not one exact
+    # value. 0.0 = exact palette colours (default, unchanged for other configs).
+    categorical_rgba_jitter: float = 0.0
+    # ± jitter magnitude for material specular/shininess/reflectance ("gloss").
+    # 0.1 = framework default; the cubes-in-cup config raises it to match the
+    # stronger jitter shown in the HTML texture demo.
+    material_gloss_perturbation_size: float = 0.1
     # Optional external texture image files (e.g. a DTD subset) fed to
     # TextureRandomizer as texture_paths: per roll, every TEXTURED visual geom
     # gets one of these images instead of a texture recycled from the model.

@@ -209,6 +209,20 @@ from molmo_spaces.utils.mujoco_scene_utils import randomize_door_joints
 log = logging.getLogger(__name__)
 
 
+def _jsonable(v):
+    """Coerce numpy scalars/arrays (and nested lists/dicts of them) to plain
+    JSON-serializable python types. Used by the per-episode sampling record."""
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    if isinstance(v, np.generic):
+        return v.item()
+    if isinstance(v, dict):
+        return {k: _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    return v
+
+
 class MetadataAdder:
     def __init__(self):
         import threading
@@ -278,6 +292,13 @@ class BaseMujocoTaskSampler:
         # Optional profiler for sub-timing within task sampling (set via set_datagen_profiler)
         self._datagen_profiler = None
 
+        # Per-episode sampling record: every randomized choice drawn during the
+        # task-sampling pass is written here (reset at the top of sample_task) so
+        # the datagen pipeline can persist it as a per-episode sidecar. Purely a
+        # side-channel for provenance/visualization; nothing reads it back into
+        # the sim, and every write is best-effort (see record_sampling).
+        self._sampling_record: dict = {}
+
         # randomizer
         self.lighting_randomizer = None
         self.texture_randomizer = None
@@ -335,6 +356,21 @@ class BaseMujocoTaskSampler:
 
         # Explicit cleanup to prevent memory leaks
         gc.collect()
+
+    def record_sampling(self, section: str, **values) -> None:
+        """Best-effort merge of randomized choices into the per-episode record.
+
+        Called from the various samplers/randomizers as they draw. Values are
+        coerced to plain JSON-friendly types (np scalars/arrays -> python) and
+        any failure is swallowed: capturing provenance must never perturb or
+        abort datagen.
+        """
+        try:
+            section_d = self._sampling_record.setdefault(section, {})
+            for k, v in values.items():
+                section_d[k] = _jsonable(v)
+        except Exception:  # never let bookkeeping break a rollout
+            pass
 
     def set_datagen_profiler(self, profiler) -> None:
         """Set the datagen profiler for sub-timing within task sampling."""
@@ -449,6 +485,15 @@ class BaseMujocoTaskSampler:
         def visibility_resolver(key):
             return self.resolve_visibility_object(env, key)
 
+        # Capture the sampled per-episode camera viewpoint/FOV/mount noise on the
+        # full (noisy) pass only — the deterministic pre-pass skips the randomized
+        # exo and would otherwise leave stale values.
+        record_cams = not deterministic_only and hasattr(
+            env.camera_manager, "begin_choice_log"
+        )
+        if record_cams:
+            env.camera_manager.begin_choice_log()
+
         env.camera_manager.setup_cameras(
             env,
             camera_config,
@@ -456,6 +501,11 @@ class BaseMujocoTaskSampler:
             visibility_resolver,
             deterministic_only=deterministic_only,
         )
+
+        if record_cams:
+            cams = env.camera_manager.pop_choice_log().get("cameras", {})
+            if cams:
+                self.record_sampling("camera", **cams)
 
     def get_workspace_center(self, env: CPUMujocoEnv) -> np.ndarray:
         """Get the workspace center for camera placement.
@@ -524,9 +574,11 @@ class BaseMujocoTaskSampler:
         self.object_synset_counter = Counter()
         self.used_robot_positions.clear()
 
-        # Re-seed if a seed was originally provided
+        # Re-seed if a seed was originally provided. ``_seed_offset`` (set per
+        # work item by the datagen worker loop) keeps parallel workers from
+        # reproducing identical episodes; defaults to 0 for single-process use.
         if self.config.seed is not None:
-            self.seed_task_sampling(self.config.seed)
+            self.seed_task_sampling(self.config.seed + getattr(self, "_seed_offset", 0))
 
     def setup_robot_scene(
         self,
@@ -873,7 +925,12 @@ class BaseMujocoTaskSampler:
                 texture_paths=self.config.task_sampler_config.dr_texture_paths,
                 scene_metadata=env.current_scene_metadata,
                 rgba_perturbation_size=0.2,
+                randomize_material_reflectance=True,
+                specular_perturbation_size=self.config.task_sampler_config.material_gloss_perturbation_size,
+                shininess_perturbation_size=self.config.task_sampler_config.material_gloss_perturbation_size,
+                reflectance_perturbation_size=self.config.task_sampler_config.material_gloss_perturbation_size,
                 categorical_geom_rgba=self.config.task_sampler_config.categorical_geom_rgba,
+                categorical_rgba_jitter=self.config.task_sampler_config.categorical_rgba_jitter,
             )
         if self.config.task_sampler_config.randomize_dynamics:
             dynamics_seed = base_seed + 2 if base_seed is not None else None
@@ -997,16 +1054,27 @@ class BaseMujocoTaskSampler:
             if self._datagen_profiler is not None:
                 self._datagen_profiler.end("randomize_lighting")
             log.info("Lighting randomization completed.\n")
+            self.record_sampling("domain_randomization", lighting=True)
 
-        if self.texture_randomizer is not None and random.random() >= 0.02:
+        # Per-episode texture decision: a 2% coin skips texture DR entirely.
+        texture_enabled = self.texture_randomizer is not None
+        texture_roll = random.random() if texture_enabled else 0.0
+        if texture_enabled and texture_roll >= 0.02:
             if self._datagen_profiler is not None:
                 self._datagen_profiler.start("randomize_texture")
+            # record concrete per-geom choices (DTD photo / palette color / jitter)
+            if hasattr(self.texture_randomizer, "begin_choice_log"):
+                self.texture_randomizer.begin_choice_log()
             if self.config.task_sampler_config.randomize_textures_all:
                 self.texture_randomizer.randomize(env.mj_datas[self.env.current_batch_index])
+                texture_mode = "all"
             elif self.config.task_sampler_config.randomize_textures:
                 self.texture_randomizer.randomize_by_category(
                     env.mj_datas[self.env.current_batch_index]
                 )
+                texture_mode = "by_category"
+            else:
+                texture_mode = "none"
 
             # Mark textures as dirty so they will be uploaded to GPU on next render
             if hasattr(env, "_renderer") and env._renderer is not None:
@@ -1015,6 +1083,20 @@ class BaseMujocoTaskSampler:
             if self._datagen_profiler is not None:
                 self._datagen_profiler.end("randomize_texture")
             log.info("Texture randomization completed.\n")
+            self.record_sampling("domain_randomization", textures=texture_mode)
+            if hasattr(self.texture_randomizer, "pop_choice_log"):
+                ch = self.texture_randomizer.pop_choice_log()
+                self.record_sampling(
+                    "textures",
+                    mode=texture_mode,
+                    palette=ch.get("palette", []),
+                    dtd=ch.get("dtd", []),
+                    rgba_jitter=ch.get("rgba_jitter", []),
+                    other_tex=ch.get("other_tex", []),
+                )
+        elif texture_enabled:
+            # coin came up in the 2% skip band
+            self.record_sampling("domain_randomization", textures="skipped")
 
         if (
             self.dynamics_randomizer is not None
@@ -1029,6 +1111,7 @@ class BaseMujocoTaskSampler:
             if self._datagen_profiler is not None:
                 self._datagen_profiler.end("randomize_dynamics")
             log.info("Dynamics randomization completed.\n")
+            self.record_sampling("domain_randomization", dynamics=True)
 
     def sample_task(
         self,
@@ -1042,6 +1125,22 @@ class BaseMujocoTaskSampler:
             house_index: Specific house index to use, overriding iteration
             variant: Scene variant to use ("ceiling", "map", "base", etc.). Defaults to "ceiling".
         """
+        # Start a fresh per-episode sampling record; each randomized draw below
+        # (base pose, object placement, init-qpos noise, DR decisions) appends to it.
+        self._sampling_record = {}
+
+        # Action noise is applied per-step (proportional to the commanded TCP
+        # delta), so the per-episode "choice" is its config. Record it once here.
+        anc = getattr(self.config.robot_config, "action_noise_config", None)
+        if anc is not None:
+            self.record_sampling(
+                "action_noise",
+                enabled=bool(getattr(anc, "enabled", False)),
+                arm_scale=getattr(anc, "action_scale_factor", None),
+                max_tcp_pos_m=getattr(anc, "max_tcp_position_noise", None),
+                max_tcp_rot_rad=getattr(anc, "max_tcp_rotation_noise", None),
+            )
+
         # save the task_config at the beginning of the experiment
         if self.config.task_config_preset_exp is None:
             self.config.task_config_preset_exp = self.config.task_config.model_copy(deep=True)

@@ -1,4 +1,6 @@
+import copy
 import gc
+import json
 import logging
 import multiprocessing as mp
 import os
@@ -231,6 +233,23 @@ def save_house_trajectories(
             )
             if prepared_episode is not None:
                 house_trajectory_data.append(prepared_episode)
+                # Per-episode sampling-choice sidecar, keyed to the same index as
+                # the episode MP4s (episode_{idx:08d}_*). Best-effort: a failure
+                # here must not abort the trajectory save.
+                try:
+                    sidecar = {
+                        "episode_idx": idx,
+                        "success": bool(episode_info.get("success", False)),
+                        "seed": episode_info.get("seed"),
+                        "sampling": episode_info.get("sampling") or {},
+                    }
+                    sidecar_path = os.path.join(
+                        house_output_dir, f"episode_{idx:08d}_sampling{batch_suffix}.json"
+                    )
+                    with open(sidecar_path, "w") as f:
+                        json.dump(sidecar, f, indent=2, default=str)
+                except Exception as e:
+                    worker_logger.warning(f"Failed to write sampling sidecar for episode {idx}: {e}")
             del episode_info["history"]
 
         t_batch = time.perf_counter() - t_start
@@ -411,6 +430,15 @@ def house_processing_worker(
                     item_idx = house_counter.value
                     house_counter.value += 1
                 current_house_id, batch_samples, batch_num, total_batches = work_items[item_idx]
+
+                # Unique seed per work item: parallel workers each create a sampler
+                # seeded to config.seed, so without this every worker reproduces the
+                # SAME episode sequence and batches duplicate across workers. item_idx
+                # is globally unique; reset() re-applies this offset on top of
+                # config.seed. No-op when config.seed is None.
+                task_sampler._seed_offset = item_idx * 100003
+                if exp_config.seed is not None:
+                    task_sampler.seed_task_sampling(exp_config.seed + task_sampler._seed_offset)
 
                 worker_logger.info(
                     f"Worker {worker_id} starting house {current_house_id} "
@@ -1059,11 +1087,17 @@ class ParallelRolloutRunner:
                         should_save_debug = not should_save and random.random() < 0.01
 
                         if should_save or should_save_debug:
+                            # Snapshot the per-episode sampling record before the
+                            # shared sampler overwrites it on the next episode.
+                            sampling_record = copy.deepcopy(
+                                getattr(episode_task_sampler, "_sampling_record", None) or {}
+                            )
                             episode_info = {
                                 "history": history,
                                 "sensor_suite": task.sensor_suite,
                                 "success": success,
                                 "seed": episode_seed,
+                                "sampling": sampling_record,
                             }
                             if should_save:
                                 house_raw_histories.append(episode_info)

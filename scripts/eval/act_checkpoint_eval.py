@@ -183,8 +183,10 @@ def main():
                          resume="allow", job_type="sim-eval")
         payload = {"eval/success_rate": rate, "eval/successes": successes, "eval/episodes": n}
         if video:
-            payload["eval/rollout"] = wandb.Video(str(video), format="mp4",
-                                                  caption=f"step {args.step}: {successes}/{n}")
+            # step-suffixed key: W&B names media files by an internal counter, not the
+            # logged step, so an unsuffixed key yields misleading filenames/slider labels
+            payload[f"eval/rollout_{args.step}"] = wandb.Video(str(video), format="mp4",
+                                                               caption=f"step {args.step}: {successes}/{n}")
         run.log(payload, step=args.step)
         run.finish()
         print(f"[eval] logged to W&B project={args.wandb_project} run={run_id} step={args.step}")

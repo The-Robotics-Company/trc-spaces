@@ -76,6 +76,8 @@ class LeRobotACTPolicy(InferencePolicy):
         self.checkpoint_path = exp_config.policy_config.checkpoint_path
         self.model = None  # lazy: instantiate post-fork, once per worker process
         self.device = None
+        self.preprocessor = None  # normalizer pipeline, loaded with the checkpoint
+        self.postprocessor = None  # unnormalizer pipeline for predicted actions
 
     def reset(self):
         if self.model is not None:
@@ -84,13 +86,35 @@ class LeRobotACTPolicy(InferencePolicy):
     def prepare_model(self):
         import torch
         from lerobot.policies.act.modeling_act import ACTPolicy
+        from lerobot.processor import PolicyProcessorPipeline
+        from lerobot.processor.converters import (
+            policy_action_to_transition,
+            transition_to_policy_action,
+        )
 
         if not os.path.isdir(self.checkpoint_path):
             raise FileNotFoundError(f"ACT checkpoint dir not found: {self.checkpoint_path}")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = ACTPolicy.from_pretrained(self.checkpoint_path)
         self.model.to(self.device).eval()
-        log.info(f"Loaded ACT checkpoint {self.checkpoint_path} on {self.device}")
+
+        # lerobot >=0.4 keeps normalization OUT of the policy, in pre/post-processor
+        # pipelines saved next to the weights; training runs batch = preprocessor(batch)
+        # before policy.forward. Skipping them feeds the net unnormalized inputs and
+        # reads its outputs as raw joint targets: measured 0.37 rad vs 0.0094 rad mean
+        # joint error on ckpt 100000, i.e. 79x worse and every rollout a silent failure.
+        self.preprocessor = PolicyProcessorPipeline.from_pretrained(
+            self.checkpoint_path,
+            config_filename="policy_preprocessor.json",
+            overrides={"device_processor": {"device": self.device}},
+        )
+        self.postprocessor = PolicyProcessorPipeline.from_pretrained(
+            self.checkpoint_path,
+            config_filename="policy_postprocessor.json",
+            to_transition=policy_action_to_transition,
+            to_output=transition_to_policy_action,
+        )
+        log.info(f"Loaded ACT checkpoint {self.checkpoint_path} (+processors) on {self.device}")
 
     def obs_to_model_input(self, obs):
         import torch
@@ -139,8 +163,10 @@ class LeRobotACTPolicy(InferencePolicy):
                 for k, v in model_input.items()
             }
         with torch.inference_mode():
-            action = self.model.select_action(model_input)
-        return action.squeeze(0).cpu().numpy()
+            # normalize in, unnormalize out — the pipelines are part of the checkpoint
+            action = self.model.select_action(self.preprocessor(dict(model_input)))
+            action = self.postprocessor(action)
+        return action.squeeze(0).float().cpu().numpy()
 
     def model_output_to_action(self, model_output):
         # action[0:9] is the ee-pose head (not executable here); drive the arm

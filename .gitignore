@@ -45,7 +45,11 @@ checkpoints/
 typings
 eval_output/
 experiment_output
-results/
+results/*
+# demo media for the data viewer's "Sampling demos" section is versioned:
+# small (~16M) and needed on every machine that builds the viewer
+!results/sampling_demos/
+!results/sampling_demos/*
 
 
 mlspaces_tests/**/test_output

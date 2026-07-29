@@ -1,0 +1,20 @@
+{
+  "id": "action_noise",
+  "group": "always-on DR",
+  "title": "Action noise \u2014 default vs cranked",
+  "desc": "TCP-space noise proportional to the commanded delta, added to every control step; the dataset stores the CLEAN commands (DART-style recovery supervision). Same seed, two noise levels \u2014 deviation stays bounded (jitter, not drift).",
+  "command": "NOISE_SCALE=1.0 NOISE_POS_CAP=0.05 NOISE_ROT_CAP=0.3 python scripts/viz/piper_x_action_noise_demo.py 21",
+  "metrics": "default: scale=0.1 pos_cap=2cm rot_cap=0.1 \u00b7 440 steps \u00b7 TCP dev mean 6.1 mm / p99 39.8 mm / max 58.5 mm  |  cranked: scale=1.0 pos_cap=5cm rot_cap=0.3 \u00b7 439 steps \u00b7 TCP dev mean 20.9 mm / p99 254.4 mm / max 297.5 mm",
+  "media": [
+    {
+      "type": "video",
+      "file": "action_noise_default.mp4",
+      "label": "datagen default (scale 0.1, caps 2 cm / 0.1 rad)"
+    },
+    {
+      "type": "video",
+      "file": "action_noise_cranked.mp4",
+      "label": "cranked (scale 1.0, caps 5 cm / 0.3 rad)"
+    }
+  ]
+}

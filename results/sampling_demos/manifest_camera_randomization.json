@@ -1,0 +1,20 @@
+{
+  "id": "camera_randomization",
+  "group": "camera sampling",
+  "title": "Randomized exocentric camera",
+  "desc": "Spherical sampling around the workspace center with a segmentation-based visibility check \u2014 the real RandomizedExocentricCameraConfig path. Each sampled camera is drawn as a frustum with its actual rendered view on the image plane; drag to orbit, scroll to zoom.",
+  "command": "python scripts/viz/piper_x_random_cam_rerun.py 7 12",
+  "metrics": "dist-to-center [0.64, 0.93] m \u00b7 fov [59.8, 76.0]\u00b0 \u00b7 x [+0.84, +1.21] y [-0.47, +0.40] z [+0.37, +0.71] m",
+  "media": [
+    {
+      "type": "cams3d",
+      "file": "camera_samples.json"
+    }
+  ],
+  "links": [
+    {
+      "label": "3D scene recording \u2014 open with: rerun random_cams_seed7.rrd",
+      "file": "random_cams_seed7.rrd"
+    }
+  ]
+}

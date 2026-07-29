@@ -1,0 +1,14 @@
+{
+  "id": "camera_noise",
+  "group": "camera sampling",
+  "title": "Camera mount & FOV noise \u2014 wrist + exo",
+  "desc": "Per-episode jitter of the AUTHORED camera mounts (stock config, both cameras; upstream DROID-wrist / RBY1-head recipes): wrist \u00b14\u00b0 FOV, \u00b11.5/0.5/1 cm, (8,4,4)\u00b0 orientation; exo \u00b13\u00b0 FOV, \u00b11 cm, \u00b14\u00b0. Complements the randomized exocentric camera above \u2014 that path re-samples the exo pose from scratch (randcam config), and its wrist cam gets this same jitter.",
+  "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py camera_noise",
+  "metrics": "over 200 rolls \u2014 wrist_camera: pos \u22641.7 cm \u00b7 rot \u22649.1\u00b0 \u00b7 fov -3.9..+4.0\u00b0  |  exo_camera: pos \u22641.6 cm \u00b7 rot \u22646.0\u00b0 \u00b7 fov -3.0..+2.9\u00b0",
+  "media": [
+    {
+      "type": "image",
+      "file": "camera_noise_grid.png"
+    }
+  ]
+}

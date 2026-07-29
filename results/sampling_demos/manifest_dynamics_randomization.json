@@ -1,0 +1,14 @@
+{
+  "id": "dynamics_randomization",
+  "group": "opt-in DR",
+  "title": "Dynamics randomization (randomize_dynamics)",
+  "desc": "Each episode re-rolls physics before the robot moves, for every body with a joint \u2014 cubes, cup, all 8 robot links, and 128 invisible grasp-planner helper bodies. Mass: one \u00b120% factor per body. Inertia: \u00b120% per body per axis. Friction: every geom of an object is set to the object's AVERAGE authored sliding friction \u00b120% \u2014 this used to quietly strip the fingertip pads of their extra grip (authored \u03bc=2.0 vs 1.0 elsewhere), so the pads were re-authored to \u03bc=1.0 on 2026-07-26 after a grip test showed no slip difference (2/2 cubes in cup either way). The chart shows authored value vs the range actually sampled. Off by default for PiPER-X cubes-in-cup \u2014 flipped on here.",
+  "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py dynamics_randomization",
+  "metrics": "200 rolls \u00b7 4 cubes + cup + 8 robot links + 128 helpers \u00b7 pooled ratio ranges: mass [0.800, 1.200] \u00b7 inertia [0.800, 1.200] \u00b7 friction [0.800, 1.200] (gripper pads: authored 1.0 \u2192 sampled [0.80, 1.20])",
+  "media": [
+    {
+      "type": "image",
+      "file": "dynamics_randomization_ranges.png"
+    }
+  ]
+}

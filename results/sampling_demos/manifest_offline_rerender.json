@@ -1,0 +1,19 @@
+{
+  "id": "offline_rerender",
+  "group": "post-hoc",
+  "title": "Offline re-render \u2014 simulate once, render many",
+  "desc": "Turns one recorded episode into several training clips with different lighting and textures, without re-running physics. Render-side changes only \u2014 moving objects, the robot, or its actions needs a real re-simulation.",
+  "command": "MUJOCO_GL=egl python scripts/viz/piper_x_offline_rerender.py --traj 1 --draws 3 --fragment",
+  "metrics": "replay fidelity: TCP stays within 0.8 mm (mean) / 9.5 mm (max) of the recording over 262 steps \u00b7 outcome preserved (recorded True \u2192 replay True) \u00b7 3 visual draws",
+  "media": [
+    {
+      "type": "image",
+      "file": "rerender_traj1_strip.png"
+    },
+    {
+      "type": "video",
+      "file": "rerender_traj1_draws_grid.mp4",
+      "label": "one episode, four looks \u2014 same motion, synced"
+    }
+  ]
+}

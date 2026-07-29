@@ -1,0 +1,170 @@
+{
+  "demos": [
+    {
+      "id": "task_sampling",
+      "group": "task sampling",
+      "title": "Task sampling \u2014 cube count & placement",
+      "desc": "Fresh initial layout per seed: cube count (1-4), measured cube/cup placement on the shelf. This is where most dataset variation comes from. (No robot init-pose noise: inert for PiPER-X \u2014 see the init_pose_noise demo.)",
+      "command": "python scripts/viz/piper_x_cubes_in_cup_preview.py <seed>",
+      "metrics": "seeds [0, 3, 5]: cube counts [3, 2, 2]",
+      "media": [
+        {
+          "type": "image",
+          "file": "task_sampling_grid.png"
+        }
+      ]
+    },
+    {
+      "id": "action_noise",
+      "group": "always-on DR",
+      "title": "Action noise \u2014 default vs cranked",
+      "desc": "TCP-space noise proportional to the commanded delta, added to every control step; the dataset stores the CLEAN commands (DART-style recovery supervision). Same seed, two noise levels \u2014 deviation stays bounded (jitter, not drift).",
+      "command": "NOISE_SCALE=1.0 NOISE_POS_CAP=0.05 NOISE_ROT_CAP=0.3 python scripts/viz/piper_x_action_noise_demo.py 21",
+      "metrics": "default: scale=0.1 pos_cap=2cm rot_cap=0.1 \u00b7 440 steps \u00b7 TCP dev mean 6.1 mm / p99 39.8 mm / max 58.5 mm  |  cranked: scale=1.0 pos_cap=5cm rot_cap=0.3 \u00b7 439 steps \u00b7 TCP dev mean 20.9 mm / p99 254.4 mm / max 297.5 mm",
+      "media": [
+        {
+          "type": "video",
+          "file": "action_noise_default.mp4",
+          "label": "datagen default (scale 0.1, caps 2 cm / 0.1 rad)"
+        },
+        {
+          "type": "video",
+          "file": "action_noise_cranked.mp4",
+          "label": "cranked (scale 1.0, caps 5 cm / 0.3 rad)"
+        }
+      ]
+    },
+    {
+      "id": "camera_randomization",
+      "group": "camera sampling",
+      "title": "Randomized exocentric camera",
+      "desc": "Spherical sampling around the workspace center with a segmentation-based visibility check \u2014 the real RandomizedExocentricCameraConfig path. Each sampled camera is drawn as a frustum with its actual rendered view on the image plane; drag to orbit, scroll to zoom.",
+      "command": "python scripts/viz/piper_x_random_cam_rerun.py 7 12",
+      "metrics": "dist-to-center [0.64, 0.93] m \u00b7 fov [59.8, 76.0]\u00b0 \u00b7 x [+0.84, +1.21] y [-0.47, +0.40] z [+0.37, +0.71] m",
+      "media": [
+        {
+          "type": "cams3d",
+          "file": "camera_samples.json"
+        }
+      ],
+      "links": [
+        {
+          "label": "3D scene recording \u2014 open with: rerun random_cams_seed7.rrd",
+          "file": "random_cams_seed7.rrd"
+        }
+      ]
+    },
+    {
+      "id": "camera_noise",
+      "group": "camera sampling",
+      "title": "Camera mount & FOV noise \u2014 wrist + exo",
+      "desc": "Per-episode jitter of the AUTHORED camera mounts (stock config, both cameras; upstream DROID-wrist / RBY1-head recipes): wrist \u00b14\u00b0 FOV, \u00b11.5/0.5/1 cm, (8,4,4)\u00b0 orientation; exo \u00b13\u00b0 FOV, \u00b11 cm, \u00b14\u00b0. Complements the randomized exocentric camera above \u2014 that path re-samples the exo pose from scratch (randcam config), and its wrist cam gets this same jitter.",
+      "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py camera_noise",
+      "metrics": "over 200 rolls \u2014 wrist_camera: pos \u22641.7 cm \u00b7 rot \u22649.1\u00b0 \u00b7 fov -3.9..+4.0\u00b0  |  exo_camera: pos \u22641.6 cm \u00b7 rot \u22646.0\u00b0 \u00b7 fov -3.0..+2.9\u00b0",
+      "media": [
+        {
+          "type": "image",
+          "file": "camera_noise_grid.png"
+        }
+      ]
+    },
+    {
+      "id": "lighting_randomization",
+      "group": "opt-in DR",
+      "title": "Lighting randomization (randomize_lighting)",
+      "desc": "Per-episode perturbation of every light around its authored value: position \u00b10.5 m, direction \u00b11 rad, ambient/diffuse/specular \u00b10.1, random on/off (at least one light is forced back on). Same seed-5 layout in every tile; only the lighting is re-rolled. Off by default for PiPER-X cubes-in-cup \u2014 flipped on here.",
+      "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py lighting_randomization",
+      "metrics": "2 lights \u00b7 7 rolls: 1-2 lights on \u00b7 diffuse mean 0.38-0.79 \u00b7 max direction tilt 48\u00b0 (cap 57\u00b0)",
+      "media": [
+        {
+          "type": "image",
+          "file": "lighting_randomization_grid.png"
+        }
+      ]
+    },
+    {
+      "id": "texture_randomization",
+      "group": "opt-in DR",
+      "title": "Texture & material randomization (randomize_textures_all)",
+      "desc": "One roll does all of this at once. Surfaces with a texture \u2014 floor, backdrop wall and cup body \u2014 get a random photo from a 200-image DTD subset (real messy surfaces, full hue range incl. warm; dr_texture_paths). Flat-colored surfaces (boards, cup) get rgba \u00b10.15 plus specular/shininess/reflectance jitter around authored values. Cubes are categorical: each independently green OR yellow per episode, gloss still jittering. Same seed-5 layout in every tile. Off by default for PiPER-X cubes-in-cup.",
+      "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py texture_randomization",
+      "metrics": "10 eligible visual geoms \u00b7 7 rolls: 4-7 materials re-colored per roll, 21 photo swaps (pool = 200 DTD images) \u00b7 cubes categorical green|yellow",
+      "media": [
+        {
+          "type": "image",
+          "file": "texture_randomization_grid.png"
+        }
+      ]
+    },
+    {
+      "id": "dynamics_randomization",
+      "group": "opt-in DR",
+      "title": "Dynamics randomization (randomize_dynamics)",
+      "desc": "Each episode re-rolls physics before the robot moves, for every body with a joint \u2014 cubes, cup, all 8 robot links, and 128 invisible grasp-planner helper bodies. Mass: one \u00b120% factor per body. Inertia: \u00b120% per body per axis. Friction: every geom of an object is set to the object's AVERAGE authored sliding friction \u00b120% \u2014 this used to quietly strip the fingertip pads of their extra grip (authored \u03bc=2.0 vs 1.0 elsewhere), so the pads were re-authored to \u03bc=1.0 on 2026-07-26 after a grip test showed no slip difference (2/2 cubes in cup either way). The chart shows authored value vs the range actually sampled. Off by default for PiPER-X cubes-in-cup \u2014 flipped on here.",
+      "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py dynamics_randomization",
+      "metrics": "200 rolls \u00b7 4 cubes + cup + 8 robot links + 128 helpers \u00b7 pooled ratio ranges: mass [0.800, 1.200] \u00b7 inertia [0.800, 1.200] \u00b7 friction [0.800, 1.200] (gripper pads: authored 1.0 \u2192 sampled [0.80, 1.20])",
+      "media": [
+        {
+          "type": "image",
+          "file": "dynamics_randomization_ranges.png"
+        }
+      ]
+    },
+    {
+      "id": "init_pose_noise",
+      "group": "always-on DR",
+      "title": "Robot init-pose noise \u2014 inert for PiPER-X",
+      "desc": "The sampler perturbs the robot's start pose per episode (graduated per joint so the TCP stays within ~10 cm), but only if the robot config defines init_qpos_noise_range \u2014 and PiperXRobotConfig ships None (measured: stock=None), so every PiPER-X episode starts at exactly the home pose. Tiles show what the mechanism would add, using a 6-joint range derived with the documented Franka recipe (dq = w\u00b70.1/\u2016J_p\u00b7w\u2016).",
+      "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py init_pose_noise",
+      "metrics": "stock range: None (inert) \u00b7 derived range [0.029, 0.058, 0.087, 0.117, 0.146, 0.175] rad \u00b7 TCP displacement over 500 draws: mean 3.3 / p95 6.6 / max 9.4 cm (budget 10 cm)",
+      "media": [
+        {
+          "type": "image",
+          "file": "init_pose_noise_grid.png"
+        },
+        {
+          "type": "image",
+          "file": "init_pose_noise_spread.png"
+        }
+      ]
+    },
+    {
+      "id": "base_pose_noise",
+      "group": "task sampling",
+      "title": "Robot base-pose noise \u2014 \u00b13 cm xyz, \u00b115\u00b0 yaw (p=0.5)",
+      "desc": "The sampler teleports the arm's mocap base every episode: uniform \u00b13 cm on each translation axis, plus \u00b115\u00b0 yaw applied with probability 0.5 (else the base stays square). Planning is unaffected because every IK/motion-gen call re-expresses world targets (and cuRobo obstacles) in the live base frame; the exo camera is scene-fixed so the diag view does not move with the base. Grid: same layout, base re-rolled. Video: full policy episode on a sampler-noised base.",
+      "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py base_pose_noise",
+      "metrics": "sampler draw (rollout, seed 21): dx -2.7 dy -1.3 dz +1.3 cm \u00b7 yaw -8.8\u00b0 \u00b7 base survives task.reset: True \u00b7 outcome: 4/4 cubes in cup, 785 steps",
+      "media": [
+        {
+          "type": "image",
+          "file": "base_pose_noise_grid.png"
+        },
+        {
+          "type": "video",
+          "file": "base_pose_noise_rollout.mp4",
+          "label": "full episode, base at dx -2.7 dy -1.3 dz +1.3 cm \u00b7 yaw -8.8\u00b0"
+        }
+      ]
+    },
+    {
+      "id": "offline_rerender",
+      "group": "post-hoc",
+      "title": "Offline re-render \u2014 simulate once, render many",
+      "desc": "Turns one recorded episode into several training clips with different lighting and textures, without re-running physics. Render-side changes only \u2014 moving objects, the robot, or its actions needs a real re-simulation.",
+      "command": "MUJOCO_GL=egl python scripts/viz/piper_x_offline_rerender.py --traj 1 --draws 3 --fragment",
+      "metrics": "replay fidelity: TCP stays within 0.8 mm (mean) / 9.5 mm (max) of the recording over 262 steps \u00b7 outcome preserved (recorded True \u2192 replay True) \u00b7 3 visual draws",
+      "media": [
+        {
+          "type": "image",
+          "file": "rerender_traj1_strip.png"
+        },
+        {
+          "type": "video",
+          "file": "rerender_traj1_draws_grid.mp4",
+          "label": "one episode, four looks \u2014 same motion, synced"
+        }
+      ]
+    }
+  ]
+}

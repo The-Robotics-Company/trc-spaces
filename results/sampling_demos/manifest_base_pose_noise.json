@@ -1,0 +1,19 @@
+{
+  "id": "base_pose_noise",
+  "group": "task sampling",
+  "title": "Robot base-pose noise \u2014 \u00b13 cm xyz, \u00b115\u00b0 yaw (p=0.5)",
+  "desc": "The sampler teleports the arm's mocap base every episode: uniform \u00b13 cm on each translation axis, plus \u00b115\u00b0 yaw applied with probability 0.5 (else the base stays square). Planning is unaffected because every IK/motion-gen call re-expresses world targets (and cuRobo obstacles) in the live base frame; the exo camera is scene-fixed so the diag view does not move with the base. Grid: same layout, base re-rolled. Video: full policy episode on a sampler-noised base.",
+  "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py base_pose_noise",
+  "metrics": "sampler draw (rollout, seed 21): dx -2.7 dy -1.3 dz +1.3 cm \u00b7 yaw -8.8\u00b0 \u00b7 base survives task.reset: True \u00b7 outcome: 4/4 cubes in cup, 785 steps",
+  "media": [
+    {
+      "type": "image",
+      "file": "base_pose_noise_grid.png"
+    },
+    {
+      "type": "video",
+      "file": "base_pose_noise_rollout.mp4",
+      "label": "full episode, base at dx -2.7 dy -1.3 dz +1.3 cm \u00b7 yaw -8.8\u00b0"
+    }
+  ]
+}

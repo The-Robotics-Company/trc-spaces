@@ -1,0 +1,14 @@
+{
+  "id": "lighting_randomization",
+  "group": "opt-in DR",
+  "title": "Lighting randomization (randomize_lighting)",
+  "desc": "Per-episode perturbation of every light around its authored value: position \u00b10.5 m, direction \u00b11 rad, ambient/diffuse/specular \u00b10.1, random on/off (at least one light is forced back on). Same seed-5 layout in every tile; only the lighting is re-rolled. Off by default for PiPER-X cubes-in-cup \u2014 flipped on here.",
+  "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py lighting_randomization",
+  "metrics": "2 lights \u00b7 7 rolls: 1-2 lights on \u00b7 diffuse mean 0.38-0.79 \u00b7 max direction tilt 48\u00b0 (cap 57\u00b0)",
+  "media": [
+    {
+      "type": "image",
+      "file": "lighting_randomization_grid.png"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "task_sampling",
+  "group": "task sampling",
+  "title": "Task sampling \u2014 cube count & placement",
+  "desc": "Fresh initial layout per seed: cube count (1-4), measured cube/cup placement on the shelf. This is where most dataset variation comes from. (No robot init-pose noise: inert for PiPER-X \u2014 see the init_pose_noise demo.)",
+  "command": "python scripts/viz/piper_x_cubes_in_cup_preview.py <seed>",
+  "metrics": "seeds [0, 3, 5]: cube counts [3, 2, 2]",
+  "media": [
+    {
+      "type": "image",
+      "file": "task_sampling_grid.png"
+    }
+  ]
+}

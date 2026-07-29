@@ -1,0 +1,18 @@
+{
+  "id": "init_pose_noise",
+  "group": "always-on DR",
+  "title": "Robot init-pose noise \u2014 inert for PiPER-X",
+  "desc": "The sampler perturbs the robot's start pose per episode (graduated per joint so the TCP stays within ~10 cm), but only if the robot config defines init_qpos_noise_range \u2014 and PiperXRobotConfig ships None (measured: stock=None), so every PiPER-X episode starts at exactly the home pose. Tiles show what the mechanism would add, using a 6-joint range derived with the documented Franka recipe (dq = w\u00b70.1/\u2016J_p\u00b7w\u2016).",
+  "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py init_pose_noise",
+  "metrics": "stock range: None (inert) \u00b7 derived range [0.029, 0.058, 0.087, 0.117, 0.146, 0.175] rad \u00b7 TCP displacement over 500 draws: mean 3.3 / p95 6.6 / max 9.4 cm (budget 10 cm)",
+  "media": [
+    {
+      "type": "image",
+      "file": "init_pose_noise_grid.png"
+    },
+    {
+      "type": "image",
+      "file": "init_pose_noise_spread.png"
+    }
+  ]
+}

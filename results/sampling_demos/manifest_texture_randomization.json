@@ -1,0 +1,14 @@
+{
+  "id": "texture_randomization",
+  "group": "opt-in DR",
+  "title": "Texture & material randomization (randomize_textures_all)",
+  "desc": "One roll does all of this at once. Surfaces with a texture \u2014 floor, backdrop wall and cup body \u2014 get a random photo from a 200-image DTD subset (real messy surfaces, full hue range incl. warm; dr_texture_paths). Flat-colored surfaces (boards, cup) get rgba \u00b10.15 plus specular/shininess/reflectance jitter around authored values. Cubes are categorical: each independently green OR yellow per episode, gloss still jittering. Same seed-5 layout in every tile. Off by default for PiPER-X cubes-in-cup.",
+  "command": "MUJOCO_GL=egl python scripts/viz/record_sampling_demos.py texture_randomization",
+  "metrics": "10 eligible visual geoms \u00b7 7 rolls: 4-7 materials re-colored per roll, 21 photo swaps (pool = 200 DTD images) \u00b7 cubes categorical green|yellow",
+  "media": [
+    {
+      "type": "image",
+      "file": "texture_randomization_grid.png"
+    }
+  ]
+}

@@ -25,7 +25,7 @@ offers no CLI overrides):
   ACT_EVAL_OUT       output root (default experiment_output/act_eval)
 
 Run:  ACT_EVAL_CKPT=... python -m molmo_spaces.data_generation.main PiperXCubesInCupACTEvalConfig
-Driver with W&B logging: scripts/eval/act_checkpoint_eval.py
+Driver with W&B logging: piper-x-policy/scripts/act_checkpoint_eval.py
 """
 
 import logging

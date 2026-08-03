@@ -62,6 +62,11 @@ def parse_args():
     ap.add_argument("--successful-only", action="store_true",
                     help="Skip episodes whose final-step success flag is False "
                          "(train on successes; the raw h5 keeps failures for study).")
+    ap.add_argument("--dagger-slice", action="store_true",
+                    help="DAgger runs (piper_x_cubes_in_cup_dagger.py): start each "
+                         "episode at sampling.dagger.switch_step from the sidecar "
+                         "JSON, dropping the student-driven prefix — only the "
+                         "expert suffix is training data.")
     ap.add_argument("--image-writer-processes", type=int, default=2)
     ap.add_argument("--image-writer-threads", type=int, default=8)
     return ap.parse_args()
@@ -102,11 +107,31 @@ def _video_path(h5_path: Path, traj_order: int, ml_cam: str) -> Path:
     raise FileNotFoundError(f"No mp4 for {ml_cam} traj#{traj_order} next to {h5_path}")
 
 
-def load_video_frames(h5_path: Path, traj_order: int, ml_cam: str, count: int) -> np.ndarray:
+def load_video_frames(h5_path: Path, traj_order: int, ml_cam: str, count: int,
+                      start: int = 0) -> np.ndarray:
     vr = VideoReader(str(_video_path(h5_path, traj_order, ml_cam)))
     if count > len(vr):
         raise RuntimeError(f"Requested {count} frames but video has {len(vr)}")
-    return vr.get_batch(list(range(count))).asnumpy()  # (count, H, W, 3) RGB uint8
+    return vr.get_batch(list(range(start, count))).asnumpy()  # (count-start, H, W, 3) RGB uint8
+
+
+def read_switch_step(h5_path: Path, traj_order: int) -> int:
+    """DAgger switch step from the episode's sampling sidecar JSON.
+
+    The collector journals it via record_sampling("dagger", switch_step=...);
+    frames before it are student-driven and must not become training data.
+    """
+    m = _BATCH_RE.search(h5_path.name)
+    # episode indices restart per batch file; the sidecar carries the same
+    # batch suffix as its h5 — a bare glob would hit another batch's episode
+    pattern = (f"episode_{traj_order:08d}_sampling_{m.group(1)}.json" if m
+               else f"episode_{traj_order:08d}_sampling*.json")
+    sidecars = sorted(h5_path.parent.glob(pattern))
+    if not sidecars:
+        raise FileNotFoundError(f"No sampling sidecar for traj#{traj_order} next to {h5_path}")
+    with sidecars[0].open() as f:
+        rec = json.load(f)
+    return int(rec["sampling"]["dagger"]["switch_step"])
 
 
 def resize_rgb(frame: np.ndarray, hw: tuple[int, int]) -> np.ndarray:
@@ -152,12 +177,18 @@ def read_policy_fps(h5_path: Path, traj_key: str) -> int:
 
 
 def convert_episode(dataset: LeRobotDataset, h5_path: Path, traj_key: str,
-                    traj_order: int, traj_len: int, successful_only: bool = False) -> int:
+                    traj_order: int, traj_len: int, successful_only: bool = False,
+                    dagger_slice: bool = False) -> int:
     """Return number of frames written, 0 if skipped, -1 if filtered as failed."""
     # Drop dummy first action, done sentinel last action, and last 2 states
     # (per https://github.com/allenai/molmospaces/blob/main/docs/data_format.md)
     effective = traj_len - 2
-    if effective < 1:
+    start = 0
+    if dagger_slice:
+        # first kept pair = (student-visited obs at the switch step, the
+        # expert's first corrective action) — exactly the DAgger label
+        start = read_switch_step(h5_path, traj_order)
+    if effective - start < 1:
         return 0
 
     with h5py.File(h5_path, "r") as f:
@@ -169,24 +200,24 @@ def convert_episode(dataset: LeRobotDataset, h5_path: Path, traj_key: str,
                 return -1
         task: str = decode_json_bytes(tg["obs_scene"][()])["task_description"]
 
-        qpos = [decode_json_bytes(tg["obs/agent/qpos"][i]) for i in range(effective)]
-        obs_eef9d = pose_quat_wxyz_to_eef9d(tg["obs/extra/tcp_pose"][:effective])
+        qpos = [decode_json_bytes(tg["obs/agent/qpos"][i]) for i in range(start, effective)]
+        obs_eef9d = pose_quat_wxyz_to_eef9d(tg["obs/extra/tcp_pose"][start:effective])
 
         # action[i] pairs with state[i] after dropping the padded first action
-        act_joint = [decode_json_bytes(tg["actions/joint_pos"][i + 1]) for i in range(effective)]
+        act_joint = [decode_json_bytes(tg["actions/joint_pos"][i + 1]) for i in range(start, effective)]
         act_ee_rows = np.stack(
             [np.asarray(decode_json_bytes(tg["actions/ee_pose"][i + 1])["arm"], dtype=np.float32)
-             for i in range(effective)],
+             for i in range(start, effective)],
             axis=0,
         )
         act_eef9d = pose_quat_wxyz_to_eef9d(act_ee_rows)
 
         cam_frames = {
-            short: load_video_frames(h5_path, traj_order, ml_cam, effective)
+            short: load_video_frames(h5_path, traj_order, ml_cam, effective, start=start)
             for short, ml_cam in CAMERAS
         }
 
-    for j in range(effective):
+    for j in range(effective - start):
         joint_pos = np.asarray(qpos[j]["arm"], dtype=np.float32)
         # obs gripper: coupled finger qpos[0], actuator units -> [0,1]
         gripper_pos = np.asarray([qpos[j]["gripper"][0] / GRIPPER_MAX], dtype=np.float32)
@@ -210,7 +241,7 @@ def convert_episode(dataset: LeRobotDataset, h5_path: Path, traj_key: str,
         dataset.add_frame(frame)
 
     dataset.save_episode()
-    return effective
+    return effective - start
 
 
 def write_modality_json(root: Path):
@@ -257,7 +288,8 @@ def main():
     for h5_path, traj_key, traj_order, traj_len in tqdm(trajs, desc="episodes"):
         try:
             n = convert_episode(dataset, h5_path, traj_key, traj_order, traj_len,
-                                successful_only=args.successful_only)
+                                successful_only=args.successful_only,
+                                dagger_slice=args.dagger_slice)
             if n == -1:
                 filtered += 1
             elif n == 0:

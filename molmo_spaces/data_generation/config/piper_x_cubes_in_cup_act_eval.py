@@ -162,10 +162,18 @@ class LeRobotACTPolicy(InferencePolicy):
                 k: (v.to(self.device) if hasattr(v, "to") else v)
                 for k, v in model_input.items()
             }
+        # delta-actions checkpoint (config.delta_actions, run 5+): the whole chunk
+        # is trained as offsets from the state of the frame it was queried at, so
+        # capture that anchor exactly when the internal queue is about to refill.
+        delta = getattr(self.model.config, "delta_actions", False)
+        if delta and len(self.model._action_queue) == 0:
+            self._delta_anchor = model_input["observation.state"].detach().clone()
         with torch.inference_mode():
             # normalize in, unnormalize out — the pipelines are part of the checkpoint
             action = self.model.select_action(self.preprocessor(dict(model_input)))
             action = self.postprocessor(action)
+        if delta:
+            action = action + self._delta_anchor.to(action.device)
         return action.squeeze(0).float().cpu().numpy()
 
     def model_output_to_action(self, model_output):

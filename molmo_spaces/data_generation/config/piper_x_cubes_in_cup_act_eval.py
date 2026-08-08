@@ -35,9 +35,11 @@ from pathlib import Path
 import numpy as np
 
 from molmo_spaces.configs.policy_configs import BasePolicyConfig
+from molmo_spaces.configs.task_configs import PickAndPlaceTaskConfig
 from molmo_spaces.configs.task_sampler_configs import PickAndPlaceTaskSamplerConfig
 from molmo_spaces.data_generation.config.piper_x_cubes_in_cup_datagen import (
     PiperXCubesInCupDataGenConfig,
+    PiperXCubesInCupTask,
 )
 from molmo_spaces.data_generation.config_registry import register_config
 from molmo_spaces.policy.base_policy import InferencePolicy, PolicyFactory
@@ -197,9 +199,36 @@ class LeRobotACTPolicyConfig(BasePolicyConfig):
     checkpoint_path: str = ""
 
 
+class PiperXCubesInCupEvalTask(PiperXCubesInCupTask):
+    """Eval-only: terminate the episode once success has HELD for a window.
+
+    Success can flicker (a cube counted in-cup for one judge call, then
+    bouncing out — observed at step 1323 of a 2026-08-05 eval that finally
+    FAILED), so terminating on first success would inflate rates. Requiring
+    ``SUCCESS_HOLD`` consecutive successful judges (~3s sim at 15 Hz) ends
+    settled successes early — median settle is ~400 of 1400 steps, so this
+    roughly halves eval wall time — without changing what counts as success.
+    Failures still run to the task horizon.
+    """
+
+    SUCCESS_HOLD = 50
+
+    def is_terminal(self) -> np.ndarray:
+        terminal = super().is_terminal()
+        streak = getattr(self, "_success_streak", 0) + 1 if self.judge_success() else 0
+        self._success_streak = streak
+        if streak >= self.SUCCESS_HOLD:
+            terminal[0] = True
+        return terminal
+
+
 @register_config("PiperXCubesInCupACTEvalConfig")
 class PiperXCubesInCupACTEvalConfig(PiperXCubesInCupDataGenConfig):
     """Datagen config with the cuRobo planner swapped for a trained ACT policy."""
+
+    task_config: PickAndPlaceTaskConfig = PickAndPlaceTaskConfig(
+        task_cls=PiperXCubesInCupEvalTask
+    )
 
     num_workers: int = int(os.environ.get("ACT_EVAL_WORKERS", "4"))
     seed: int | None = int(os.environ.get("ACT_EVAL_SEED", "20260728"))
